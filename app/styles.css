@@ -500,6 +500,9 @@ tr.absent .ind-name > div > div:first-child { color: var(--muted); }
 .pc-req input { accent-color: var(--red); }
 .page-check.on .pc-req { color: var(--red); }
 .pc-req.off { opacity: .35; cursor: default; }
+/* 只标了其中几项时，勾显示半选，文字变成"3/14"，一眼看出不是整页 */
+.pc-req.has { color: var(--red); font-variant-numeric: tabular-nums; }
+.pc-req.has input { opacity: .75; }
 
 /* ---------- 指标与页面：弹层 ---------- */
 .modal-box.wide { max-width: 1000px; padding: 20px 24px 18px; }
@@ -543,6 +546,8 @@ tr.absent .ind-name > div > div:first-child { color: var(--muted); }
 .pane-scroll { max-height: 52vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
 
 table.mini-grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.mini-grid .req-head, .mini-grid .req-cell { width: 44px; text-align: center; padding-left: 4px; padding-right: 4px; }
+.mini-grid .req-cell input { width: 14px; height: 14px; accent-color: var(--red); cursor: pointer; }
 .mini-grid thead th {
   position: sticky;
   top: 0;

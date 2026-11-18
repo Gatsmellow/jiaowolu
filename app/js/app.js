@@ -70,8 +70,11 @@
    *
    * 这两件事必须分开：勾了"血常规"只表示这次会看血常规，
    * 不代表没录到就要标红——真实病历里永远有没做的检查。
-   * 只有明确标了"必填"的页面，缺项才算质控问题。默认一个都不标。 */
-  var SEL_KEY = 'jiaowolu.selectedPages.v2';
+   * 只有明确标了"必填"的指标，缺项才算质控问题。默认一个都不标。
+   *
+   * 必填精确到指标而不是整页：真正必须有的往往是某几项（血红蛋白、尿酸），
+   * 而整页缺失有时并不算问题（这次没做增强CT）。页面上的那个勾只是"整页批量"开关。 */
+  var SEL_KEY = 'jiaowolu.selectedPages.v3';
   var selected = null;
 
   function loadSelected() {
@@ -82,15 +85,28 @@
       try {
         var obj = JSON.parse(raw);
         if (obj && Array.isArray(obj.ids)) {
-          selected = { ids: obj.ids, req: Array.isArray(obj.req) ? obj.req : [] };
+          selected = { ids: obj.ids, reqIds: Array.isArray(obj.reqIds) ? obj.reqIds : [] };
           return selected;
         }
       } catch (e) { /* 存档坏了就重来 */ }
     }
+    // 上一版存的是"必填页面"，升级时把它展开成"必填指标"
+    var legacy = null;
+    try { legacy = localStorage.getItem('jiaowolu.selectedPages.v2'); } catch (e) { /* ignore */ }
+    if (legacy) {
+      try {
+        var old = JSON.parse(legacy);
+        if (old && Array.isArray(old.ids)) {
+          selected = { ids: old.ids, reqIds: unionOf(Array.isArray(old.req) ? old.req : []) };
+          saveSelected();
+          return selected;
+        }
+      } catch (e) { /* ignore */ }
+    }
     // 默认：只勾"默认要看"的页面（on:false 的先不勾，需要时自己勾上），没有一个算必填
     var on = window.Library.pages().filter(function (p) { return p.on !== false; });
     if (!on.length) on = window.Library.pages();
-    selected = { ids: on.map(function (p) { return p.id; }), req: [] };
+    selected = { ids: on.map(function (p) { return p.id; }), reqIds: [] };
     return selected;
   }
 
@@ -114,22 +130,32 @@
   function targetIds() { return unionOf(loadSelected().ids); }
 
   /* 缺了要标红的那几项。默认空——没有必选项，就没有平白无故的红。 */
-  function requiredIds() { return unionOf(loadSelected().req); }
+  function requiredIds() {
+    return loadSelected().reqIds.filter(function (id) { return !!window.Library.byId(id); });
+  }
 
-  function isRequired(indId) { return requiredIds().indexOf(indId) !== -1; }
+  function isRequired(indId) { return loadSelected().reqIds.indexOf(indId) !== -1; }
 
+  /* 页面上那个"必填"勾只是批量开关：勾上=整页指标都必填，取消=整页都不必填。
+     只标了一部分时显示成半选，鼠标停上去能看到是几项里的几项。 */
   function pageRowHtml(p, sel) {
     var on = sel.ids.indexOf(p.id) !== -1;
-    var req = sel.req.indexOf(p.id) !== -1;
+    var total = p.ids.length;
+    var need = p.ids.filter(function (id) { return sel.reqIds.indexOf(id) !== -1; }).length;
+    var all = total > 0 && need === total;
+    var part = need > 0 && need < total;
     return '<div class="page-check' + (on ? ' on' : '') + '">' +
       '<label class="pc-main">' +
         '<input type="checkbox" class="pc-use" value="' + esc(p.id) + '"' + (on ? ' checked' : '') + '>' +
         '<span class="pc-name">' + esc(p.name) + '</span>' +
-        '<span class="pc-count">' + p.ids.length + '</span>' +
+        '<span class="pc-count">' + total + '</span>' +
       '</label>' +
-      '<label class="pc-req' + (on ? '' : ' off') + '" title="勾上以后，这一页没录到才会标红">' +
+      '<label class="pc-req' + (on ? '' : ' off') + (need ? ' has' : '') + '"' +
+        ' title="' + (part ? '这一页有 ' + need + '/' + total + ' 项必填' : '整页必填：缺了会标红') + '">' +
         '<input type="checkbox" class="pc-must" value="' + esc(p.id) + '"' +
-          (req && on ? ' checked' : '') + (on ? '' : ' disabled') + '>必填' +
+          (all ? ' checked' : '') + (on ? '' : ' disabled') +
+          (part ? ' data-part="1"' : '') + '>' +
+        (part ? need + '/' + total : '必填') +
       '</label>' +
       '</div>';
   }
@@ -157,6 +183,8 @@
       html += special.map(function (p) { return pageRowHtml(p, sel); }).join('');
     }
     box.innerHTML = html;
+    // 半选的勾要用 DOM 属性设，不能写在 HTML 里
+    box.querySelectorAll('.pc-must[data-part]').forEach(function (el) { el.indeterminate = true; });
   }
 
   function assetsOf(pid) {
@@ -818,6 +846,8 @@
       var hay = (i.id + ' ' + i.name + ' ' + (i.aliases || []).join(' ')).toLowerCase();
       var hidden = q && hay.indexOf(q) === -1;
       return '<tr data-hay="' + esc(hay) + '"' + (hidden ? ' hidden' : '') + '>' +
+        '<td class="req-cell"><input type="checkbox" class="ind-req" data-act="ind-req" value="' + esc(i.id) + '"' +
+          (isRequired(i.id) ? ' checked' : '') + ' title="标了必填，缺了才标红"></td>' +
         '<td class="mono">' + esc(i.id) + '</td>' +
         '<td>' + esc(i.name) + '</td>' +
         '<td>' + esc((i.type || 'num') === 'num' ? i.unit : (i.type === 'date' ? '日期' : '文本')) + '</td>' +
@@ -930,7 +960,7 @@
         '<input id="ind-search" class="pick-search" placeholder="搜索代号、名称或同义词…">' +
         '<div class="pane-scroll">' +
           '<table class="mini-grid"><thead><tr>' +
-            '<th>代号</th><th>名称</th><th>单位</th><th>参考范围</th><th>同义词</th><th></th>' +
+            '<th class="req-head" title="打勾的项，这次没录到就会标红">必填</th><th>代号</th><th>名称</th><th>单位</th><th>参考范围</th><th>同义词</th><th></th>' +
           '</tr></thead><tbody id="ind-rows">' + indicatorRows('') + '</tbody></table>' +
         '</div>';
     } else {
@@ -996,6 +1026,20 @@
     }
 
     try {
+      if (act === 'ind-req') {
+        var cur = loadSelected();
+        var rid = btn.value;
+        var on = btn.checked;
+        selected = { ids: cur.ids.slice(), reqIds: cur.reqIds.slice() };
+        var at = selected.reqIds.indexOf(rid);
+        if (on && at === -1) selected.reqIds.push(rid);
+        if (!on && at !== -1) selected.reqIds.splice(at, 1);
+        saveSelected();
+        renderPageChecks();          // 侧栏那个"必填"勾的整页/半选状态跟着变
+        renderStats();
+        renderTable();
+        return;
+      }
       if (act === 'lib-export') { exportLibrary(); return; }
       else if (act === 'lib-import') { importLibrary(); return; }
       else if (act === 'ind-new') { libForm = { kind: 'ind', mode: 'new' }; renderLibrary(); }
@@ -1042,7 +1086,6 @@
         window.Library.removePage(id);
         var sel1 = loadSelected();
         sel1.ids = sel1.ids.filter(function (x) { return x !== id; });
-        sel1.req = sel1.req.filter(function (x) { return x !== id; });
         saveSelected();
         libChangeDone('已删除');
         renderLibrary();
@@ -1118,14 +1161,22 @@
   function exportJson() {
     if (!S.patients.length) { toast('没有可导出的内容', 'err'); return; }
     var pages = window.Library.pages();
+    var sel = loadSelected();
+    var reqList = requiredIds();
     var out = {
       app: 'jiaowolu',
       version: 1,
       exportedAt: new Date().toISOString(),
-      pages: pages.filter(function (p) { return selected.ids.indexOf(p.id) >= 0; })
+      pages: pages.filter(function (p) { return sel.ids.indexOf(p.id) >= 0; })
         .map(function (p) { return { id: p.id, name: p.name }; }),
-      requiredPages: pages.filter(function (p) { return selected.req.indexOf(p.id) >= 0; })
-        .map(function (p) { return { id: p.id, name: p.name }; }),
+      // 必填已经精确到指标；这一项保留"整页都必填"的页面，方便外部按页判断
+      requiredPages: pages.filter(function (p) {
+        return p.ids.length > 0 && p.ids.every(function (id) { return reqList.indexOf(id) >= 0; });
+      }).map(function (p) { return { id: p.id, name: p.name }; }),
+      requiredIndicators: reqList.map(function (id) {
+        var ind = window.Library.byId(id);
+        return { code: id, name: ind ? ind.name : id };
+      }),
       patients: S.patients.map(function (p) {
         return {
           code: p.code,
@@ -1256,20 +1307,28 @@
       if (!cb) return;
       var id = cb.value;
       var cur = loadSelected();
-      selected = { ids: cur.ids.slice(), req: cur.req.slice() };
+      selected = { ids: cur.ids.slice(), reqIds: cur.reqIds.slice() };
 
       if (cb.classList.contains('pc-must')) {
-        var j = selected.req.indexOf(id);
-        if (cb.checked && j === -1) selected.req.push(id);
-        if (!cb.checked && j !== -1) selected.req.splice(j, 1);
+        // 整页批量：勾上就整页必填，取消就整页都不必填（含之前单独标的那几项）
+        var page = window.Library.pageById(id);
+        var ids = page ? page.ids : [];
+        if (cb.checked) {
+          ids.forEach(function (x) {
+            if (selected.reqIds.indexOf(x) === -1 && window.Library.byId(x)) selected.reqIds.push(x);
+          });
+        } else {
+          selected.reqIds = selected.reqIds.filter(function (x) { return ids.indexOf(x) === -1; });
+        }
       } else {
         var i = selected.ids.indexOf(id);
         if (cb.checked && i === -1) selected.ids.push(id);
         if (!cb.checked && i !== -1) selected.ids.splice(i, 1);
-        // 不参与本次的页面，顺手把"必填"也撤掉，免得留下一颗哑弹
+        // 不参与本次的页面，就不该再占着"必填"——否则取消勾选后红点还在，像哑弹
         if (!cb.checked) {
-          var k = selected.req.indexOf(id);
-          if (k !== -1) selected.req.splice(k, 1);
+          var pid = window.Library.pageById(id);
+          var pids = pid ? pid.ids : [];
+          selected.reqIds = selected.reqIds.filter(function (x) { return pids.indexOf(x) === -1; });
         }
       }
       saveSelected();
