@@ -511,12 +511,14 @@
             'title="点开看每次就诊的值">另有 ' + (c.dates.length - 1) + ' 次</button>';
         }
 
+        // 参考范围优先用报告上印的那一栏：各实验室按性别、年龄分组，比库里的默认值准
+        var refText = (c.obs && String(c.obs.ref || '').trim()) || (isNum ? ind.ref : '');
         return '<tr class="' + c.state + '"' + (collapsed ? ' hidden' : '') + ' data-ind="' + r.id + '">' +
           '<td><div class="ind-name"><span class="ind-dot ' + c.state + '"></span>' +
             '<div><div>' + esc(ind.name) + '</div><div class="ind-code">' + esc(ind.id) + '</div></div></div></td>' +
           '<td><input class="val-input" data-ind="' + r.id + '" value="' + esc(value) + '" placeholder="未识别"></td>' +
           '<td>' + esc(isNum ? ind.unit : (ind.type === 'date' ? '日期' : '')) + '</td>' +
-          '<td>' + esc(isNum ? ind.ref : '') + '</td>' +
+          '<td>' + esc(refText) + '</td>' +
           '<td>' + srcCell + ' ' + badgeOf(c.state) + '</td>' +
           '</tr>';
       }).join('');
