@@ -224,7 +224,7 @@ async function main() {
     console.log(`\n结果：已识别 ${ok} 项，必填缺失 ${missing} 项，未提供 ${absent} 项，共 ${rows.length} 行`);
     if (ok < 20) { console.error('[!] 识别到的项目偏少，检查提示词或图片清晰度'); process.exitCode = 1; }
     if (missing !== 2) { console.error('[!] 期待正好 2 项必填缺失（血红蛋白、尿酸），实际 ' + missing); process.exitCode = 1; }
-    if (absent < 3) { console.error('[!] 没有"未提供"的行，说明默认必填没有被取消'); process.exitCode = 1; }
+    if (rows.length < 35) { console.error('[!] 表格行数偏少，页面可能没加载全'); process.exitCode = 1; }
 
     // ---- 第 7 步：自定义指标 + 自定义页面 ----
     console.log('[7/7] 新建指标 → 新建页面 → 刷新后还在不在');

@@ -87,8 +87,10 @@
         }
       } catch (e) { /* 存档坏了就重来 */ }
     }
-    // 默认：所有页面都参与抽取，但没有一个算必填
-    selected = { ids: window.Library.pages().map(function (p) { return p.id; }), req: [] };
+    // 默认：只勾"默认要看"的页面（on:false 的先不勾，需要时自己勾上），没有一个算必填
+    var on = window.Library.pages().filter(function (p) { return p.on !== false; });
+    if (!on.length) on = window.Library.pages();
+    selected = { ids: on.map(function (p) { return p.id; }), req: [] };
     return selected;
   }
 

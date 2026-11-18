@@ -18,8 +18,9 @@
 (function (global) {
   'use strict';
 
-  // v2：结构变了（指标多了 type，页面按真实登记表重排），旧档不再兼容
-  var STORE_KEY = 'jiaowolu.library.v2';
+  // v3：指标与页面扩到 90 项 / 15 页；从 v2 升级时把新默认项并进去，不丢用户自己加的
+  var STORE_KEY = 'jiaowolu.library.v3';
+  var PREV_KEY = 'jiaowolu.library.v2';
   var OLD_KEY = 'jiaowolu.library.v1';
 
   function num(id, name, group, unit, ref, low, high, aliases) {
@@ -80,23 +81,119 @@
     num('CA', '钙',   '电解质', 'mmol/L', '2.11–2.52', 2.11, 2.52, ['钙', '血钙', '钙离子', 'Ca', 'Ca2+']),
 
     // ---- 血糖（综合生化里常见，单独成项） ----
-    num('GLU', '葡萄糖', '生化', 'mmol/L', '3.9–6.1', 3.9, 6.1, ['葡萄糖', '血糖', '空腹血糖', 'GLU', 'Glu', 'FPG'])
+    num('GLU', '葡萄糖', '生化', 'mmol/L', '3.9–6.1', 3.9, 6.1, ['葡萄糖', '血糖', '空腹血糖', 'GLU', 'Glu', 'FPG']),
+
+    /* ---- 以下是第二批：按真实报告常见的成套项目补的 ----
+       原则：只收"一张报告上会成组出现"的项目。孤立的、病种太专的（如基因测序、
+       病理分型）不往里塞——那些更适合现场用「新建指标」按需加。 */
+
+    // 血常规五分类里最常被登记的四项 + 红细胞指数
+    num('NEUT_C', '中性粒细胞计数', '血常规', '10^9/L', '1.8–6.3', 1.8, 6.3, ['中性粒细胞计数', '中性粒细胞绝对值', 'NEUT#', 'NEUT', '中性粒细胞']),
+    num('MONO_C', '单核细胞计数', '血常规', '10^9/L', '0.1–0.6', 0.1, 0.6, ['单核细胞计数', '单核细胞绝对值', 'MONO#', 'MONO', '单核细胞']),
+    num('HCT', '红细胞压积', '血常规', '%', '40–50', 40, 50, ['红细胞压积', '红细胞比容', '红细胞比积', 'HCT', 'Hct']),
+    num('MCV', '平均红细胞体积', '血常规', 'fL', '82–100', 82, 100, ['平均红细胞体积', 'MCV']),
+    num('MCH', '平均血红蛋白量', '血常规', 'pg', '27–34', 27, 34, ['平均血红蛋白量', '平均血红蛋白含量', 'MCH']),
+
+    // 出凝血补充
+    num('INR', '国际标准化比值', '出凝血', '', '0.8–1.2', 0.8, 1.2, ['国际标准化比值', 'INR']),
+
+    // 肝功能补充
+    num('TP', '总蛋白', '肝功能', 'g/L', '65–85', 65, 85, ['总蛋白', '血清总蛋白', 'TP']),
+    num('GLB', '球蛋白', '肝功能', 'g/L', '20–40', 20, 40, ['球蛋白', 'GLB']),
+    num('IBIL', '间接胆红素', '肝功能', 'μmol/L', '1.7–13.7', 1.7, 13.7, ['间接胆红素', '非结合胆红素', 'IBIL', 'I-BIL']),
+
+    // 肾功能补充
+    num('CYSC', '胱抑素C', '肾功能', 'mg/L', '0.51–1.09', 0.51, 1.09, ['胱抑素C', '半胱氨酸蛋白酶抑制剂C', 'CysC', 'CYSC']),
+    num('B2MG', 'β2-微球蛋白', '肾功能', 'mg/L', '1.0–3.0', 1.0, 3.0, ['β2-微球蛋白', 'β2微球蛋白', 'B2MG', 'β2-MG']),
+
+    // 电解质补充
+    num('P', '磷', '电解质', 'mmol/L', '0.85–1.51', 0.85, 1.51, ['磷', '血磷', '无机磷', 'P', 'PHOS']),
+    num('MG', '镁', '电解质', 'mmol/L', '0.75–1.02', 0.75, 1.02, ['镁', '血镁', '镁离子', 'MG', 'Mg']),
+
+    // 心肌酶
+    num('CK', '肌酸激酶', '心肌酶', 'U/L', '40–200', 40, 200, ['肌酸激酶', 'CK', 'CPK']),
+    num('CKMB', '肌酸激酶同工酶', '心肌酶', 'U/L', '0–25', 0, 25, ['肌酸激酶同工酶', 'CK-MB', 'CKMB', 'MB']),
+    num('HBDH', 'α-羟丁酸脱氢酶', '心肌酶', 'U/L', '72–182', 72, 182, ['α-羟丁酸脱氢酶', '羟丁酸脱氢酶', 'HBDH', 'α-HBDH']),
+    num('CTNI', '肌钙蛋白I', '心肌酶', 'ng/mL', '0–0.04', 0, 0.04, ['肌钙蛋白I', '肌钙蛋白', 'cTnI', 'TNI']),
+
+    // 血脂
+    num('TC', '总胆固醇', '血脂', 'mmol/L', '2.8–5.18', 2.8, 5.18, ['总胆固醇', '胆固醇', 'TC', 'CHOL']),
+    num('TG', '甘油三酯', '血脂', 'mmol/L', '0.56–1.70', 0.56, 1.70, ['甘油三酯', '三酰甘油', 'TG']),
+    num('HDLC', '高密度脂蛋白胆固醇', '血脂', 'mmol/L', '1.04–1.55', 1.04, 1.55, ['高密度脂蛋白胆固醇', '高密度脂蛋白', 'HDL-C', 'HDLC']),
+    num('LDLC', '低密度脂蛋白胆固醇', '血脂', 'mmol/L', '1.5–3.37', 1.5, 3.37, ['低密度脂蛋白胆固醇', '低密度脂蛋白', 'LDL-C', 'LDLC']),
+
+    // 甲功
+    num('TSH', '促甲状腺激素', '甲功', 'mIU/L', '0.27–4.2', 0.27, 4.2, ['促甲状腺激素', 'TSH']),
+    num('FT3', '游离三碘甲状腺原氨酸', '甲功', 'pmol/L', '3.1–6.8', 3.1, 6.8, ['游离三碘甲状腺原氨酸', '游离T3', 'FT3']),
+    num('FT4', '游离甲状腺素', '甲功', 'pmol/L', '12–22', 12, 22, ['游离甲状腺素', '游离T4', 'FT4']),
+    num('TT3', '总三碘甲状腺原氨酸', '甲功', 'nmol/L', '1.3–3.1', 1.3, 3.1, ['总三碘甲状腺原氨酸', '总T3', 'TT3']),
+    num('TT4', '总甲状腺素', '甲功', 'nmol/L', '66–181', 66, 181, ['总甲状腺素', '总T4', 'TT4']),
+
+    // 肿瘤标志物
+    num('CEA', '癌胚抗原', '肿瘤标志物', 'ng/mL', '0–5', 0, 5, ['癌胚抗原', 'CEA']),
+    num('AFP', '甲胎蛋白', '肿瘤标志物', 'ng/mL', '0–7', 0, 7, ['甲胎蛋白', 'AFP']),
+    num('CA125', '糖类抗原125', '肿瘤标志物', 'U/mL', '0–35', 0, 35, ['糖类抗原125', 'CA125', 'CA-125']),
+    num('CA199', '糖类抗原19-9', '肿瘤标志物', 'U/mL', '0–27', 0, 27, ['糖类抗原199', '糖类抗原19-9', 'CA199', 'CA19-9']),
+    num('CA153', '糖类抗原15-3', '肿瘤标志物', 'U/mL', '0–25', 0, 25, ['糖类抗原153', '糖类抗原15-3', 'CA153', 'CA15-3']),
+    num('SF', '铁蛋白', '肿瘤标志物', 'ng/mL', '30–400', 30, 400, ['铁蛋白', '血清铁蛋白', 'SF', 'FERR']),
+
+    // 免疫球蛋白与补体
+    num('IGG', '免疫球蛋白G', '免疫球蛋白', 'g/L', '7.0–16.0', 7, 16, ['免疫球蛋白G', 'IgG', 'IGG']),
+    num('IGA', '免疫球蛋白A', '免疫球蛋白', 'g/L', '0.7–4.0', 0.7, 4.0, ['免疫球蛋白A', 'IgA', 'IGA']),
+    num('IGM', '免疫球蛋白M', '免疫球蛋白', 'g/L', '0.4–2.3', 0.4, 2.3, ['免疫球蛋白M', 'IgM', 'IGM']),
+    num('IGE', '免疫球蛋白E', '免疫球蛋白', 'IU/mL', '0–100', 0, 100, ['免疫球蛋白E', 'IgE', 'IGE']),
+    num('C3', '补体C3', '免疫球蛋白', 'g/L', '0.9–1.8', 0.9, 1.8, ['补体C3', 'C3']),
+    num('C4', '补体C4', '免疫球蛋白', 'g/L', '0.1–0.4', 0.1, 0.4, ['补体C4', 'C4']),
+
+    // 淋巴细胞亚群（绝对值）
+    num('CD3', 'T淋巴细胞', '淋巴细胞亚群', '10^9/L', '0.96–2.86', 0.96, 2.86, ['T淋巴细胞', 'CD3+', 'CD3']),
+    num('CD4', '辅助T淋巴细胞', '淋巴细胞亚群', '10^9/L', '0.45–1.44', 0.45, 1.44, ['辅助T淋巴细胞', 'CD4+', 'CD4']),
+    num('CD8', '抑制T淋巴细胞', '淋巴细胞亚群', '10^9/L', '0.32–1.25', 0.32, 1.25, ['抑制T淋巴细胞', 'CD8+', 'CD8']),
+    num('CD4CD8', 'CD4/CD8比值', '淋巴细胞亚群', '', '0.70–2.00', 0.7, 2.0, ['CD4/CD8', 'CD4CD8', 'CD4与CD8比值']),
+    num('CD19', 'B淋巴细胞', '淋巴细胞亚群', '10^9/L', '0.09–0.56', 0.09, 0.56, ['B淋巴细胞', 'CD19+', 'CD19']),
+    num('NK', '自然杀伤细胞', '淋巴细胞亚群', '10^9/L', '0.15–1.10', 0.15, 1.10, ['自然杀伤细胞', 'NK细胞', 'NK']),
+
+    // 感染筛查（定性，只看阳性/阴性，不判断临床意义）
+    txt('HBSAG', '乙肝表面抗原', '感染筛查', ['乙肝表面抗原', 'HBsAg', '表面抗原']),
+    txt('HBSAB', '乙肝表面抗体', '感染筛查', ['乙肝表面抗体', 'HBsAb', '表面抗体']),
+    txt('HBEAG', '乙肝e抗原', '感染筛查', ['乙肝e抗原', 'HBeAg']),
+    txt('HBEAB', '乙肝e抗体', '感染筛查', ['乙肝e抗体', 'HBeAb']),
+    txt('HBCAB', '乙肝核心抗体', '感染筛查', ['乙肝核心抗体', 'HBcAb', '核心抗体']),
+    txt('HCVAB', '丙肝抗体', '感染筛查', ['丙肝抗体', '丙型肝炎抗体', '抗-HCV', 'HCVAb']),
+    txt('TRUST', '梅毒螺旋体抗体', '感染筛查', ['梅毒螺旋体抗体', '梅毒抗体', 'TRUST', 'TPPA']),
+    txt('HIVAB', 'HIV抗体', '感染筛查', ['HIV抗体', '艾滋病抗体', '抗-HIV', 'HIVAb']),
+
+    // 铁代谢
+    num('FE', '血清铁', '铁代谢', 'μmol/L', '9–30', 9, 30, ['血清铁', '铁', 'FE', 'SI']),
+    num('TIBC', '总铁结合力', '铁代谢', 'μmol/L', '45–75', 45, 75, ['总铁结合力', 'TIBC']),
+    num('TSAT', '转铁蛋白饱和度', '铁代谢', '%', '20–50', 20, 50, ['转铁蛋白饱和度', 'TSAT', '铁饱和度'])
   ];
 
-  var LIVER = ['ALT', 'AST', 'ALP', 'GGT', 'LDH', 'TBIL', 'DBIL', 'ALB'];
-  var RENAL = ['BUN', 'CREA', 'UA'];
-  var ELEC = ['NA', 'K', 'CL', 'CA'];
+  var LIVER = ['ALT', 'AST', 'ALP', 'GGT', 'LDH', 'TBIL', 'DBIL', 'IBIL', 'ALB', 'TP', 'GLB'];
+  var RENAL = ['BUN', 'CREA', 'UA', 'CYSC', 'B2MG'];
+  var ELEC = ['NA', 'K', 'CL', 'CA', 'P', 'MG'];
 
+  /* on:false 的页面默认不勾选——库可以大，但默认打开的表不该有上百行。
+     需要哪一页，在左侧勾上就行。 */
   var DEFAULT_PAGES = [
     { id: 'course', name: '病程首页', ids: ['NAME', 'SEX', 'ADMNO', 'AGE', 'VISITDATE', 'DIAG', 'ETHNIC', 'HOSP'] },
-    { id: 'cbc',    name: '血常规',   ids: ['WBC', 'RBC', 'HGB', 'PLT', 'LYMPH_C'] },
-    { id: 'coag',   name: '出凝血',   ids: ['APTT', 'PT', 'TT', 'FIB', 'FDP', 'DDIMER'] },
+    { id: 'cbc',    name: '血常规',   ids: ['WBC', 'RBC', 'HGB', 'PLT', 'LYMPH_C', 'NEUT_C', 'MONO_C', 'HCT', 'MCV', 'MCH'] },
+    { id: 'coag',   name: '出凝血',   ids: ['APTT', 'PT', 'TT', 'FIB', 'FDP', 'DDIMER', 'INR'] },
     { id: 'liver',  name: '肝功能',   ids: LIVER },
     { id: 'renal',  name: '肾功能',   ids: RENAL },
     { id: 'elec',   name: '电解质',   ids: ELEC },
     // 综合生化 = 肝功 + 肾功 + 电解质（+ 血糖）合并成一页的报告，
     // 和上面三页是"填一个或填三个"的关系。指标是同一批，不会重复计费也不会重复计数。
-    { id: 'bio',    name: '综合生化', ids: LIVER.concat(RENAL, ELEC, ['GLU']) }
+    { id: 'bio',    name: '综合生化', ids: LIVER.concat(RENAL, ELEC, ['GLU']) },
+
+    { id: 'cardiac', name: '心肌酶',       on: false, ids: ['CK', 'CKMB', 'HBDH', 'LDH', 'CTNI'] },
+    { id: 'lipid',   name: '血脂',         on: false, ids: ['TC', 'TG', 'HDLC', 'LDLC'] },
+    { id: 'thyroid', name: '甲功',         on: false, ids: ['TSH', 'FT3', 'FT4', 'TT3', 'TT4'] },
+    { id: 'tumor',   name: '肿瘤标志物',   on: false, ids: ['CEA', 'AFP', 'CA125', 'CA199', 'CA153', 'SF'] },
+    { id: 'immune',  name: '免疫球蛋白',   on: false, ids: ['IGG', 'IGA', 'IGM', 'IGE', 'C3', 'C4'] },
+    { id: 'lymph',   name: '淋巴细胞亚群', on: false, ids: ['CD3', 'CD4', 'CD8', 'CD4CD8', 'CD19', 'NK'] },
+    { id: 'infect',  name: '感染筛查',     on: false, ids: ['HBSAG', 'HBSAB', 'HBEAG', 'HBEAB', 'HBCAB', 'HCVAB', 'TRUST', 'HIVAB'] },
+    { id: 'iron',    name: '铁代谢',       on: false, ids: ['FE', 'TIBC', 'TSAT'] }
   ];
 
   var state = { indicators: [], pages: [] };
@@ -131,6 +228,33 @@
     var raw = null;
     try { raw = global.localStorage.getItem(STORE_KEY); } catch (e) { /* 隐私模式 */ }
     if (!raw) {
+      // 从上一版升级：保留用户自己加的指标，把新的默认项并进来
+      var prev = null;
+      try { prev = global.localStorage.getItem(PREV_KEY); } catch (e) { /* ignore */ }
+      if (prev) {
+        try {
+          var old = JSON.parse(prev);
+          if (old && Array.isArray(old.indicators) && Array.isArray(old.pages)) {
+            var haveI = {};
+            old.indicators.forEach(function (i) { haveI[i.id] = 1; if (!i.type) i.type = 'num'; });
+            DEFAULT_INDICATORS.forEach(function (d) { if (!haveI[d.id]) old.indicators.push(clone(d)); });
+            var haveP = {};
+            old.pages.forEach(function (p) { haveP[p.id] = 1; });
+            DEFAULT_PAGES.forEach(function (d) { if (!haveP[d.id]) old.pages.push(clone(d)); });
+            // 老页面若只是默认页的子集（说明当时没改过），扩到默认的那一版
+            old.pages.forEach(function (p) {
+              var def = DEFAULT_PAGES.filter(function (d) { return d.id === p.id; })[0];
+              if (!def || p.ids.length >= def.ids.length) return;
+              var subset = p.ids.every(function (id) { return def.ids.indexOf(id) >= 0; });
+              if (subset) p.ids = def.ids.slice();
+            });
+            state = { indicators: old.indicators, pages: old.pages };
+            rebuild(); save();
+            try { global.localStorage.removeItem(PREV_KEY); } catch (e2) { /* ignore */ }
+            return;
+          }
+        } catch (e) { /* 升级失败就走种子 */ }
+      }
       state = seed; rebuild();
       try { global.localStorage.removeItem(OLD_KEY); } catch (e) { /* ignore */ }
       return;
@@ -330,7 +454,9 @@
     var ids = (raw.ids || []).filter(function (id) { return !!BY_ID[id]; });
     if (!ids.length) throw new Error('至少选一个指标');
     var id = String(raw.id || '').trim() || 'p' + Date.now().toString(36);
-    return { id: id, name: name, ids: ids };
+    var page = { id: id, name: name, ids: ids };
+    if (raw.on === false) page.on = false;   // 默认不勾选的页（库大、默认表要小）
+    return page;
   }
 
   function addPage(raw) {
@@ -344,7 +470,7 @@
   function updatePage(id, raw) {
     var i = state.pages.map(function (x) { return x.id; }).indexOf(id);
     if (i === -1) throw new Error('这个页面已经不在了');
-    var p = cleanPage({ id: id, name: raw.name, ids: raw.ids });
+    var p = cleanPage({ id: id, name: raw.name, ids: raw.ids, on: raw.on });
     state.pages[i] = p;
     save();
     return p;
