@@ -169,6 +169,36 @@
     return false;
   }
 
+  /* ---------------- 跨页找回（M7） ----------------
+   * 必填项在"该管它的那一页"没读到，但在同一位患者的别的报告里读到了。
+   * 这种情况不能当"已识别"糊过去：数值可能是上一次住院的，时间点对不上。
+   * 所以单独标成"跨页找回"，把来源写清楚，等人确认。只在同一位患者内找。 */
+  var TYPE_PAGES = {
+    '血常规': ['cbc'],
+    '生化': ['bio', 'liver', 'renal', 'elec'], // 一份生化单上肝功能/肾功能/电解质都在
+    '出凝血': ['coag'],
+    '病程首页': ['course']
+  };
+
+  function pagesOfAsset(a) {
+    if (!a) return [];
+    return TYPE_PAGES[String(a.reportType || '').trim()] || [];
+  }
+
+  function homePagesOf(indId) {
+    return window.Library.pages()
+      .filter(function (p) { return (p.ids || []).indexOf(indId) >= 0; })
+      .map(function (p) { return p.id; });
+  }
+
+  function inPlace(o, homePages) {
+    if (!homePages.length) return true;   // 不属于任何页面，谈不上跑错页
+    var a = S.assets.filter(function (x) { return x.id === o.assetId; })[0];
+    var ps = pagesOfAsset(a);
+    if (!ps.length) return true;          // 认不出这份报告是哪类，不做判断
+    return ps.some(function (pid) { return homePages.indexOf(pid) >= 0; });
+  }
+
   function cellState(pid, indId) {
     var list = obsOf(pid, indId);
     var ind = window.Library.byId(indId);
@@ -201,6 +231,14 @@
     if (o.method !== 'manual' && o.confidence != null && o.confidence < LOW_CONFIDENCE) {
       return { state: 'low', obs: o, list: picked };
     }
+
+    // 值是从别的报告里找回来的（本页没读到）
+    if (isRequired(indId)) {
+      var home = homePagesOf(indId);
+      var anyInPlace = picked.some(function (x) { return inPlace(x, home); });
+      if (!anyInPlace) return { state: 'borrowed', obs: o, list: picked };
+    }
+
     return { state: 'ok', obs: o, list: picked };
   }
 
@@ -257,7 +295,7 @@
   function renderStats() {
     var p = current();
     var ids = targetIds();
-    var n = { missing: 0, low: 0, ok: 0, conflict: 0, absent: 0 };
+    var n = { missing: 0, low: 0, ok: 0, conflict: 0, absent: 0, borrowed: 0 };
     if (p) {
       ids.forEach(function (id) {
         var s = cellState(p.id, id).state;
@@ -265,10 +303,13 @@
       });
     }
     var red = n.missing + n.conflict;
+    var note = n.borrowed
+      ? '<div class="stat-note">另有 ' + n.borrowed + ' 项这份报告里没有，是从同一患者的其他报告里找回的，请核对时间点</div>'
+      : '';
     $('#stats').innerHTML =
       '<div class="stat red"><b>' + red + '</b><span>必填缺失</span></div>' +
       '<div class="stat amber"><b>' + n.low + '</b><span>存疑</span></div>' +
-      '<div class="stat green"><b>' + n.ok + '</b><span>已识别</span></div>';
+      '<div class="stat green"><b>' + n.ok + '</b><span>已识别</span></div>' + note;
   }
 
   /* ---------------- 渲染：表格 ---------------- */
@@ -298,6 +339,7 @@
         var a = S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0];
         if (a) {
           var label = a.kind === 'pdf' ? '报告 ' + a.fileIndex + ' · 第 ' + a.pageNo + ' 页' : '报告 ' + a.fileIndex;
+          if (c.state === 'borrowed') label += ' · 跨页';
           srcCell = '<button class="src-link" data-src="' + a.id + '">' + esc(label) + '</button>';
         }
       }
@@ -306,7 +348,8 @@
         low: '<span class="badge low">置信度低</span>',
         missing: '<span class="badge missing">必填缺失</span>',
         conflict: '<span class="badge conflict">两处不一致</span>',
-        absent: '<span class="badge absent">未提供</span>'
+        absent: '<span class="badge absent">未提供</span>',
+        borrowed: '<span class="badge borrowed">跨页找回</span>'
       }[c.state] || '';
 
       return '<tr class="' + c.state + '" data-ind="' + id + '">' +
@@ -522,6 +565,8 @@
       '4. indicator 只能从下面的候选里选。这一页没有的项目，不要出现在 items 里。',
       '5. 如果这一页根本不是报告（比如身份证、发票、空白页），items 返回空数组。',
       '6. 文本项（姓名、性别、诊断等）逐字照抄，不要改写、不要补全、不要翻译。',
+      '7. 页眉或表头里印着姓名、性别、年龄、住院号，只要清晰可辨，也照抄下来（记在对应代号下），' +
+      '不要因为它们"不像检验项目"就跳过。',
       '',
       '候选指标：',
       lines
