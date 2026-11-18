@@ -199,7 +199,7 @@ async function main() {
     const assetInfo = await cdp.eval('window.__S.assets.map(a => ({idx: a.fileIndex, st: a.status, err: a.error || ""}))');
     console.log('    资产状态：', JSON.stringify(assetInfo));
     const rows = await cdp.eval(`
-      Array.from(document.querySelectorAll('#grid-body tr')).map(tr => ({
+      Array.from(document.querySelectorAll('#grid-body tr[data-ind]')).map(tr => ({
         state: tr.className,
         ind: tr.getAttribute('data-ind'),
         value: tr.querySelector('.val-input')?.value || '',

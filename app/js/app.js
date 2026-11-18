@@ -19,12 +19,34 @@
   var LOW_CONFIDENCE = 0.6;
   var smallCount = 0;          // 本次上传里有多少张低分辨率图
 
+  /* 文书类型 → 只有这类文书上才会成组出现的页面。
+     先判类型再抽取，是为了不让模型到出院记录的正文里去"捞"血常规——
+     那里面确实写着"白细胞计数:5.54*10^9/L"，照抄下来就成了另一份来源，
+     跟真正的化验单对不上，白白制造一堆"两处不一致"。 */
+  var DOC_PAGES = {
+    '血常规': ['cbc'],
+    '生化': ['bio', 'liver', 'renal', 'elec'],
+    '出凝血': ['coag'],
+    '免疫': ['immu'],
+    '病毒学': ['infect'],
+    'FISH': ['fish'],
+    '病理': ['patho'],
+    '骨髓流式': ['flow'],
+    '影像': ['ct'],
+    '病案首页': ['course'],
+    '出院小结': ['discharge'],
+    '其他': []
+  };
+  /* 页眉字段：每一份单据的抬头都可能印着，跟文书类型无关 */
+  var HEADER_IDS = ['NAME', 'SEX', 'AGE', 'ADMNO', 'VISITDATE', 'HOSP'];
+
   var S = {
     patients: [],
     currentId: null,
     assets: [],
     observations: [],
     running: false,
+    collapse: {},              // 页面分组是展开还是收起，用户点过就记住
     seq: { patient: 0, asset: 0, obs: 0 }
   };
 
@@ -292,6 +314,7 @@
     var list = p ? assetsOf(p.id) : [];
     box.innerHTML = list.map(function (a) {
       var label = a.kind === 'pdf' ? '报告 ' + a.fileIndex + ' · 第 ' + a.pageNo + ' 页' : '报告 ' + a.fileIndex;
+      if (a.docType && a.status === 'done') label += ' · ' + a.docType;
       var st = a.status === 'done' ? '<span class="asset-state ok">已识别</span>'
         : a.status === 'running' ? '<span class="asset-state run">识别中</span>'
           : a.status === 'skipped' ? '<span class="asset-state" title="长边不到 900 像素，没送去识别">已跳过</span>'
@@ -335,10 +358,32 @@
 
   /* ---------------- 渲染：表格 ---------------- */
 
+  // 红在前、绿在中、灰在后。翻表格的人最先要看的永远是"哪里出问题了"。
+  var STATE_RANK = { conflict: 0, missing: 1, low: 2, ok: 3, absent: 4 };
+
+  function assetLabel(a, date) {
+    var label = a.kind === 'pdf' ? '报告 ' + a.fileIndex + ' · 第 ' + a.pageNo + ' 页' : '报告 ' + a.fileIndex;
+    var ds = String(date || '');
+    if (/^\d{4}-\d{2}-\d{2}/.test(ds)) ds = ds.slice(5, 10);   // 只留月日，省地方
+    return label + (ds ? ' · ' + ds : '');
+  }
+
+  function srcLabel(assetId, date) {
+    var a = S.assets.filter(function (x) { return x.id === assetId; })[0];
+    return a ? assetLabel(a, date) : '未知来源';
+  }
+
+  function badgeOf(state) {
+    var text = {
+      ok: '已识别', low: '置信度低', missing: '必填缺失',
+      conflict: '两处不一致', absent: '未提供'
+    }[state];
+    return text ? '<span class="badge ' + state + '">' + text + '</span>' : '';
+  }
+
   function renderTable() {
     var body = $('#grid-body');
     var p = current();
-    var ids = targetIds();
 
     if (!p) {
       body.innerHTML = '<tr><td colspan="5" class="empty-hint">先添加一位患者</td></tr>';
@@ -349,40 +394,88 @@
       return;
     }
 
-    body.innerHTML = ids.map(function (id) {
-      var ind = window.IndicatorLib.byId(id);
-      var c = cellState(p.id, id);
-      var value = c.obs && c.obs.value != null ? String(c.obs.value) : '';
-      var isNum = (ind.type || 'num') === 'num';
+    var sel = loadSelected();
+    var tgt = targetIds();
 
-      var srcCell = '';
-      if (c.obs && c.obs.assetId) {
-        var a = S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0];
-        if (a) {
-          var label = a.kind === 'pdf' ? '报告 ' + a.fileIndex + ' · 第 ' + a.pageNo + ' 页' : '报告 ' + a.fileIndex;
-          var ds = String(c.obs.date || '');
-          if (/^\d{4}-\d{2}-\d{2}/.test(ds)) ds = ds.slice(5, 10);   // 只留月日，省地方
-          if (ds) label += ' · ' + ds;
-          srcCell = '<button class="src-link" data-src="' + a.id + '">' + esc(label) + '</button>';
+    // 指标按"第一个包含它的已选页面"归组；同一个指标出现在多个页面里（综合生化）
+    // 只在第一处出现一次，免得同一项在表里重复两遍。
+    var own = {};
+    var groups = [];
+    window.Library.pages().forEach(function (pg) {
+      if (sel.ids.indexOf(pg.id) === -1) return;
+      var keep = [];
+      pg.ids.forEach(function (id) {
+        if (own[id] || tgt.indexOf(id) === -1) return;
+        own[id] = pg.id;
+        keep.push(id);
+      });
+      if (keep.length) groups.push({ page: pg, ids: keep });
+    });
+
+    var html = groups.map(function (g) {
+      var rows = g.ids.map(function (id) {
+        var c = cellState(p.id, id);
+        return { id: id, c: c, rank: STATE_RANK[c.state] != null ? STATE_RANK[c.state] : 9 };
+      });
+      rows.sort(function (a, b) { return a.rank - b.rank; });
+
+      var n = { conflict: 0, missing: 0, low: 0, ok: 0, absent: 0 };
+      rows.forEach(function (r) { n[r.c.state] = (n[r.c.state] || 0) + 1; });
+
+      // 用户点过就听用户的；没点过时，一个字都没读到的页面默认收起，省得 140 行里翻半天。
+      // 注意：默认值不写回 S.collapse——否则第一次渲染时的"全灰"状态会被永久记住。
+      var stored = S.collapse[g.page.id];
+      var collapsed = stored === undefined
+        ? ((n.conflict + n.missing + n.low + n.ok) === 0)
+        : stored;
+
+      var countBits = [];
+      if (n.conflict) countBits.push('<b class="c-red">' + n.conflict + ' 处不一致</b>');
+      if (n.missing) countBits.push('<b class="c-red">' + n.missing + ' 缺</b>');
+      if (n.low) countBits.push('<b class="c-amber">' + n.low + ' 存疑</b>');
+      if (n.ok) countBits.push('<b class="c-green">' + n.ok + ' 已识别</b>');
+      if (n.absent) countBits.push('<b class="c-gray">' + n.absent + ' 未提供</b>');
+
+      var head = '<tr class="group-row" data-page="' + esc(g.page.id) + '">' +
+        '<td colspan="5"><span class="caret">' + (collapsed ? '▸' : '▾') + '</span>' +
+        '<span class="gname">' + esc(g.page.name) + '</span>' +
+        '<span class="gcount">' + countBits.join(' · ') + '</span></td></tr>';
+
+      var bodyRows = rows.map(function (r) {
+        var ind = window.Library.byId(r.id);
+        var c = r.c;
+        var value = c.obs && c.obs.value != null ? String(c.obs.value) : '';
+        var isNum = (ind.type || 'num') === 'num';
+
+        var srcCell = '';
+        if (c.state === 'conflict' && c.list && c.list.length > 1) {
+          // 冲突就把几个来源全列出来，点一下能看到每一份的原文
+          var labels = c.list.slice(0, 3).map(function (o) { return srcLabel(o.assetId, o.date); });
+          if (c.list.length > 3) labels.push('等 ' + c.list.length + ' 份');
+          srcCell = '<button class="src-link conflict-src" data-cmp="' + esc(r.id) + '" ' +
+            'title="点开看每一份报告读到的值和日期">' + esc(labels.join(' / ')) + '</button>';
+        } else if (c.obs && c.obs.assetId) {
+          var a = S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0];
+          if (a) {
+            srcCell = '<button class="src-link" data-src="' + a.id + '">' +
+              esc(assetLabel(a, c.obs.date)) + '</button>';
+          }
         }
-      }
-      var badge = {
-        ok: '<span class="badge ok">已识别</span>',
-        low: '<span class="badge low">置信度低</span>',
-        missing: '<span class="badge missing">必填缺失</span>',
-        conflict: '<span class="badge conflict">两处不一致</span>',
-        absent: '<span class="badge absent">未提供</span>'
-      }[c.state] || '';
 
-      return '<tr class="' + c.state + '" data-ind="' + id + '">' +
-        '<td><div class="ind-name"><span class="ind-dot ' + c.state + '"></span>' +
-          '<div><div>' + esc(ind.name) + '</div><div class="ind-code">' + esc(ind.id) + '</div></div></div></td>' +
-        '<td><input class="val-input" data-ind="' + id + '" value="' + esc(value) + '" placeholder="未识别"></td>' +
-        '<td>' + esc(isNum ? ind.unit : (ind.type === 'date' ? '日期' : '')) + '</td>' +
-        '<td>' + esc(isNum ? ind.ref : '') + '</td>' +
-        '<td>' + srcCell + ' ' + badge + '</td>' +
-        '</tr>';
+        return '<tr class="' + c.state + '"' + (collapsed ? ' hidden' : '') + ' data-ind="' + r.id + '">' +
+          '<td><div class="ind-name"><span class="ind-dot ' + c.state + '"></span>' +
+            '<div><div>' + esc(ind.name) + '</div><div class="ind-code">' + esc(ind.id) + '</div></div></div></td>' +
+          '<td><input class="val-input" data-ind="' + r.id + '" value="' + esc(value) + '" placeholder="未识别"></td>' +
+          '<td>' + esc(isNum ? ind.unit : (ind.type === 'date' ? '日期' : '')) + '</td>' +
+          '<td>' + esc(isNum ? ind.ref : '') + '</td>' +
+          '<td>' + srcCell + ' ' + badgeOf(c.state) + '</td>' +
+          '</tr>';
+      }).join('');
+
+      return head + bodyRows;
     }).join('');
+
+    body.innerHTML = html || '<tr><td colspan="5" class="empty-hint">本次没有勾选任何页面</td></tr>';
   }
 
   function renderAll() {
@@ -550,7 +643,47 @@
 
   /* ---------------- 识别 ---------------- */
 
-  function buildPrompt(ids, pageText) {
+  /* 只让模型看一眼标题和表格结构，判断这是什么文书。这一步很便宜（几百 token），
+     换来的是后面那一大段候选指标能砍掉八成。 */
+  var CLASSIFY_PROMPT = [
+    '看这一页病历或检验单据，判断它属于哪一种文书。只看最上面的标题、抬头和版面结构，不要逐行读数据。',
+    '',
+    '可选类型：血常规、生化、出凝血、免疫、病毒学、FISH、病理、骨髓流式、影像、病案首页、出院小结、其他。',
+    '说明：',
+    '- 生化：肝功能、肾功能、电解质、血糖、心肌酶等，合并成一张或分成几张都算生化；',
+    '- 免疫：免疫球蛋白、补体、β2微球蛋白、铁蛋白、血沉、免疫固定电泳；',
+    '- 影像：CT、MRI、超声、X 线、PET-CT 的文字报告（不是影像胶片本身）；',
+    '- 出院小结：出院记录、出院小结、阶段小结；',
+    '- 病案首页：住院病案首页及其附页；',
+    '- 病理：病理报告、免疫组化；FISH 是荧光原位杂交，单独一类；',
+    '- 骨髓流式：流式细胞术的免疫分型报告。',
+    '拿不准就填"其他"。',
+    '',
+    '只输出 JSON：{"doc_type":"...","title":"这页最上面的标题原文","confidence":0.0}'
+  ].join('\n');
+
+  async function classifyAsset(asset) {
+    var res = await window.Model.vision(asset.dataUrl, CLASSIFY_PROMPT, { maxTokens: 300, json: true });
+    var d = {};
+    try { d = parseJson(res.text); } catch (e) { d = {}; }
+    var t = String(d.doc_type || '').trim();
+    if (!Object.prototype.hasOwnProperty.call(DOC_PAGES, t)) t = '其他';
+    return { type: t, title: String(d.title || ''), confidence: d.confidence };
+  }
+
+  /* 这类文书上应该出现哪些指标 = 它对应的页面 + 页眉字段，再和"本次要看"取交集 */
+  function candidatesFor(type) {
+    var want = HEADER_IDS.slice();
+    (DOC_PAGES[type] || []).forEach(function (pid) {
+      var pg = window.Library.pageById(pid);
+      if (!pg) return;
+      pg.ids.forEach(function (id) { if (want.indexOf(id) === -1) want.push(id); });
+    });
+    var tgt = targetIds();
+    return want.filter(function (id) { return tgt.indexOf(id) !== -1 && window.Library.byId(id); });
+  }
+
+  function buildPrompt(ids, pageText, docType) {
     var lines = ids.map(function (id) {
       var ind = window.Library.byId(id);
       if (!ind) return '';
@@ -593,10 +726,16 @@
       '不要因为它们"不像检验项目"就跳过。',
       '8. 定性结果（免疫组化的 +、−、±，FISH 的阳性/阴性，下拉框里的"未做""不详"）照原样输出，' +
       '   只写图上印着的那个，不要自己判断该是哪一种。',
-      '',
-      '候选指标：',
-      lines
+      '9. 只抽"这一页自己那张表"里的项目。叙述性段落（入院情况、住院经过、出院医嘱、讨论）里' +
+      '   顺带提到的化验数字，一律不要抽——它们属于别的文书，抽出来会和真正的化验单打架。',
+      ''
     ];
+    if (docType && DOC_PAGES[docType]) {
+      body.push('这一页的文书类型是【' + docType + '】。候选指标只列了这类文书上才会有的项目，' +
+        '属于别的文书的项目（例如出院记录正文里提到的血常规数值）不要抽。', '');
+    }
+    body.push('候选指标：');
+    body.push(lines);
 
     if (pageText) {
       body = body.concat([
@@ -623,13 +762,27 @@
     return obj;
   }
 
-  async function recognizeAsset(asset, ids) {
+  async function recognizeAsset(asset) {
     asset.status = 'running';
     renderAssets();
 
-    var res = await window.Model.vision(asset.dataUrl, buildPrompt(ids, asset.pageText));
-    var data = parseJson(res.text);
-    var items = Array.isArray(data.items) ? data.items : [];
+    // 第一步：先认这是什么文书（便宜）。用户手动指定过就跳过，直接信他。
+    var cls = asset.typeForced
+      ? { type: asset.docType, title: asset.docTitle || '', confidence: null }
+      : await classifyAsset(asset);
+    asset.docType = cls.type;
+    asset.docTitle = cls.title;
+
+    // 第二步：只把这类文书上应该出现的指标发给它。
+    var ids = candidatesFor(cls.type);
+    var data = { report_date: '' };
+    var items = [];
+    var res = null;
+    if (ids.length) {
+      res = await window.Model.vision(asset.dataUrl, buildPrompt(ids, asset.pageText, cls.type));
+      data = parseJson(res.text);
+      items = Array.isArray(data.items) ? data.items : [];
+    }
 
     // 先清掉这份报告旧的识别结果，保证"一份报告只抽一次"
     S.observations = S.observations.filter(function (o) { return o.assetId !== asset.id; });
@@ -663,10 +816,10 @@
 
     asset.status = 'done';
     asset.error = '';
-    asset.reportType = data.report_type || '';
+    asset.reportType = data.report_type || cls.type;
     asset.reportDate = data.report_date || '';
     asset.unmatched = unmatched;
-    return { added: added, unmatched: unmatched, ms: res.ms, usage: res.usage };
+    return { added: added, unmatched: unmatched, ms: res ? res.ms : 0, usage: res ? res.usage : null, type: cls.type };
   }
 
   async function runRecognize() {
@@ -700,7 +853,6 @@
 
     S.running = true;
     setRunning(true);
-    var ids = targetIds();
     var done = 0, failed = 0;
 
     var queue = todo.slice();
@@ -711,12 +863,12 @@
           // 模型偶发返回坏 JSON 或限流，重试一次通常就好了。
           // 演示现场不能因为一次抖动就让一页报告变成"失败"。
           try {
-            await recognizeAsset(a, ids);
+            await recognizeAsset(a);
           } catch (e1) {
             if (e1 && e1.name === 'AbortError') throw e1;
             a.status = 'pending';
             await new Promise(function (r) { setTimeout(r, 900); });
-            await recognizeAsset(a, ids);
+            await recognizeAsset(a);
           }
         } catch (e) {
           a.status = 'error';
@@ -822,12 +974,89 @@
         (o.unit ? ' ' + esc(o.unit) : '') + '</div>';
     }).join('');
 
+    var opts = Object.keys(DOC_PAGES).map(function (t) {
+      return '<option value="' + esc(t) + '"' + (a.docType === t ? ' selected' : '') + '>' + esc(t) + '</option>';
+    }).join('');
+
     openModal(
       '<h3>' + esc(a.kind === 'pdf' ? '报告 ' + a.fileIndex + ' · 第 ' + a.pageNo + ' 页' : '报告 ' + a.fileIndex) + '</h3>' +
       '<p class="source-meta">' + esc(a.name) + '</p>' +
+      '<div class="field" style="margin-bottom:10px">' +
+        '<label>文书类型（认错了会少抽指标，可以在这里改）</label>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<select id="src-type" style="flex:1">' + opts + '</select>' +
+          '<button id="src-retype" class="btn tiny">按这个类型重抽</button>' +
+        '</div>' +
+      '</div>' +
       '<img class="source-img" src="' + a.dataUrl + '" alt="">' +
       (rows ? '<div style="margin-top:12px">' + rows + '</div>' : '')
     );
+
+    var btn = $('#src-retype');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        var t = $('#src-type').value;
+        a.docType = t;
+        a.typeForced = true;
+        a.status = 'pending';                 // 下次点"开始识别"会重抽这一页
+        S.observations = S.observations.filter(function (o) { return o.assetId !== a.id; });
+        closeModal();
+        renderAll();
+        toast('已改成「' + t + '」，点"开始识别"重新抽取这一页', 'ok');
+      });
+    }
+  }
+
+  /* 两处不一致：把每一份报告读到的值并排列出来，点哪一行看哪一页。
+     光说"不一致"没用——人得知道差在哪、差多少、是不是同一次就诊。 */
+  function openCompare(indId) {
+    var p = current();
+    if (!p) return;
+    var c = cellState(p.id, indId);
+    var ind = window.Library.byId(indId);
+    if (!ind) return;
+
+    var rows = (c.list || []).map(function (o) {
+      var a = S.assets.filter(function (x) { return x.id === o.assetId; })[0];
+      return '<tr>' +
+        '<td class="mono">' + esc(srcLabel(o.assetId, o.date)) + '</td>' +
+        '<td><b>' + esc(o.value || '空') + '</b> ' + esc(o.unit || '') + '</td>' +
+        '<td class="muted">' + esc(o.ref || '') + '</td>' +
+        '<td class="tiny muted">' + esc(o.rawName || '') + '</td>' +
+        '<td class="row-act">' +
+          (a ? '<button class="link" data-src="' + a.id + '">看原页</button>' : '') +
+          '<button class="link" data-pick="' + esc(o.id) + '">以此为准</button>' +
+        '</td>' +
+        '</tr>';
+    }).join('');
+
+    openModal(
+      '<h3>' + esc(ind.name) + ' · 两处不一致</h3>' +
+      '<p class="note">同一个指标，在不同报告里读到了不同的值。常见原因有三种：' +
+      '这两份报告不是同一天做的；其中一份不是检验单（比如出院记录正文里顺带提到过这个数）；' +
+      '或者确实读错了。</p>' +
+      '<table class="mini-grid cmp-table"><thead><tr>' +
+        '<th>来源</th><th>读到的值</th><th>参考范围</th><th>原文项目名</th><th></th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<p class="note">以哪一份为准由你判断。点"以此为准"，其余来源会被丢掉，这一项立即变成已识别；' +
+      '也可以直接回到表格里改这个值。</p>',
+      'wide'
+    );
+  }
+
+  /* 人工裁决：认了某一条，同患者同指标的其它来源就作废——否则它永远红着。 */
+  function pickObservation(obsId) {
+    var keep = S.observations.filter(function (o) { return o.id === obsId; })[0];
+    if (!keep) return;
+    S.observations = S.observations.filter(function (o) {
+      if (o.id === obsId) return true;
+      return !(o.patientId === keep.patientId && o.indicatorId === keep.indicatorId);
+    });
+    keep.method = 'manual';          // 人工确认过的，不再因为置信度低而标黄
+    keep.confidence = 1;
+    closeModal();
+    renderAll();
+    toast('已按这一份为准', 'ok');
   }
 
   /* ---------------- 指标与页面 ---------------- */
@@ -1390,6 +1619,15 @@
     });
 
     $('#grid-body').addEventListener('click', function (e) {
+      var g = e.target.closest('.group-row');
+      if (g) {
+        var pid = g.getAttribute('data-page');
+        S.collapse[pid] = !S.collapse[pid];
+        renderTable();
+        return;
+      }
+      var cmp = e.target.closest('[data-cmp]');
+      if (cmp) { openCompare(cmp.getAttribute('data-cmp')); return; }
       var b = e.target.closest('[data-src]');
       if (b) openSource(b.getAttribute('data-src'));
     });
@@ -1426,6 +1664,8 @@
     $('#btn-library').addEventListener('click', function () { openLibrary('ind'); });
 
     $('#modal-box').addEventListener('click', function (e) {
+      var pick = e.target.closest('[data-pick]');
+      if (pick) { pickObservation(pick.getAttribute('data-pick')); return; }
       if (e.target.closest('[data-act]') || e.target.closest('[data-tab]')) handleLibraryClick(e);
     });
 

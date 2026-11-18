@@ -371,6 +371,30 @@ tr.absent .ind-name > div > div:first-child { color: var(--muted); }
 }
 .src-link:hover { text-decoration: underline; }
 
+/* ---------- 表格里的页面分组 ---------- */
+.group-row td {
+  background: #eef2f8;
+  border-top: 1px solid #dfe6f1;
+  cursor: pointer;
+  user-select: none;
+  padding-top: 7px; padding-bottom: 7px;
+}
+.group-row:hover td { background: #e7edf7; }
+.group-row .caret { display: inline-block; width: 16px; color: #8b96a8; font-size: 11px; }
+.group-row .gname { font-weight: 600; color: var(--ink); }
+.group-row .gcount { margin-left: 10px; font-size: 11.5px; }
+.group-row .gcount b { font-weight: 500; }
+.group-row .c-red { color: var(--red); }
+.group-row .c-amber { color: var(--amber); }
+.group-row .c-green { color: var(--green); }
+.group-row .c-gray { color: #98a2b3; }
+tr.group-hidden { display: none; }
+#grid-body tr[hidden] { display: none; }
+
+.src-link.conflict-src { color: var(--red); font-size: 11.5px; line-height: 1.35; }
+.cmp-table td { vertical-align: top; }
+.cmp-table .mono { font-size: 11.5px; }
+
 /* ---------- 弹层 ---------- */
 .modal {
   position: fixed;
