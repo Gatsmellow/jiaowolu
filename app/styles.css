@@ -662,10 +662,6 @@ table.mini-grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .asset.lowres img { filter: grayscale(.5) contrast(.95); }
 .asset.lowres { border-color: var(--red-soft); }
 /* 跨页找回：值不是从这一页读到的，用蓝色区分——既不是错，也不能当已经完成 */
-.ind-dot.borrowed { background: #7c5cd6; }
-tr.borrowed { background: #f4f0fd; }
-tr.borrowed:hover td { background: #f4f0fd; }
-.badge.borrowed { background: #ece5fb; color: #6141b8; }
 .stat-note {
   grid-column: 1 / -1;
   margin-top: 2px;

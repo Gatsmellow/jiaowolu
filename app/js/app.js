@@ -169,35 +169,13 @@
     return false;
   }
 
-  /* ---------------- 跨页找回（M7） ----------------
-   * 必填项在"该管它的那一页"没读到，但在同一位患者的别的报告里读到了。
-   * 这种情况不能当"已识别"糊过去：数值可能是上一次住院的，时间点对不上。
-   * 所以单独标成"跨页找回"，把来源写清楚，等人确认。只在同一位患者内找。 */
-  var TYPE_PAGES = {
-    '血常规': ['cbc'],
-    '生化': ['bio', 'liver', 'renal', 'elec'], // 一份生化单上肝功能/肾功能/电解质都在
-    '出凝血': ['coag'],
-    '病程首页': ['course']
-  };
-
-  function pagesOfAsset(a) {
-    if (!a) return [];
-    return TYPE_PAGES[String(a.reportType || '').trim()] || [];
-  }
-
-  function homePagesOf(indId) {
-    return window.Library.pages()
-      .filter(function (p) { return (p.ids || []).indexOf(indId) >= 0; })
-      .map(function (p) { return p.id; });
-  }
-
-  function inPlace(o, homePages) {
-    if (!homePages.length) return true;   // 不属于任何页面，谈不上跑错页
-    var a = S.assets.filter(function (x) { return x.id === o.assetId; })[0];
-    var ps = pagesOfAsset(a);
-    if (!ps.length) return true;          // 认不出这份报告是哪类，不做判断
-    return ps.some(function (pid) { return homePages.indexOf(pid) >= 0; });
-  }
+  /* ---------------- 关于"跨页" ----------------
+   * 曾经有个"跨页找回"的紫色状态：值是从别的报告里找回来的就标紫。
+   * 后来去掉了，因为它在真实流程里几乎必然发生——一份综合生化单本来就同时
+   * 供着肝功能、肾功能、电解质三个页面，用户上传本来也不按页面分。
+   * 紫色一多，红黄绿就没有信息量了："报错太多等于没报错"。
+   * 现在的处理：谁能对上指标就用谁的值，来源列写清楚是哪份报告、哪一天；
+   * 只有"该有却没有"（必填缺失）才是红的。 */
 
   function cellState(pid, indId) {
     var list = obsOf(pid, indId);
@@ -230,15 +208,13 @@
     }
 
     var o = picked[0];
-    if (o.method !== 'manual' && o.confidence != null && o.confidence < LOW_CONFIDENCE) {
+    if (o.warn === 'unit') {
+      // 项目认出来了，但单位跟标准库不是一类（比如报告用 mg/dL、库里是 mmol/L）。
+      // 不丢值，标成存疑，让人确认要不要换算。
       return { state: 'low', obs: o, list: picked };
     }
-
-    // 值是从别的报告里找回来的（本页没读到）
-    if (isRequired(indId)) {
-      var home = homePagesOf(indId);
-      var anyInPlace = picked.some(function (x) { return inPlace(x, home); });
-      if (!anyInPlace) return { state: 'borrowed', obs: o, list: picked };
+    if (o.method !== 'manual' && o.confidence != null && o.confidence < LOW_CONFIDENCE) {
+      return { state: 'low', obs: o, list: picked };
     }
 
     return { state: 'ok', obs: o, list: picked };
@@ -297,7 +273,7 @@
   function renderStats() {
     var p = current();
     var ids = targetIds();
-    var n = { missing: 0, low: 0, ok: 0, conflict: 0, absent: 0, borrowed: 0 };
+    var n = { missing: 0, low: 0, ok: 0, conflict: 0, absent: 0 };
     if (p) {
       ids.forEach(function (id) {
         var s = cellState(p.id, id).state;
@@ -305,13 +281,10 @@
       });
     }
     var red = n.missing + n.conflict;
-    var note = n.borrowed
-      ? '<div class="stat-note">另有 ' + n.borrowed + ' 项这份报告里没有，是从同一患者的其他报告里找回的，请核对时间点</div>'
-      : '';
     $('#stats').innerHTML =
       '<div class="stat red"><b>' + red + '</b><span>必填缺失</span></div>' +
       '<div class="stat amber"><b>' + n.low + '</b><span>存疑</span></div>' +
-      '<div class="stat green"><b>' + n.ok + '</b><span>已识别</span></div>' + note;
+      '<div class="stat green"><b>' + n.ok + '</b><span>已识别</span></div>';
   }
 
   /* ---------------- 渲染：表格 ---------------- */
@@ -341,7 +314,9 @@
         var a = S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0];
         if (a) {
           var label = a.kind === 'pdf' ? '报告 ' + a.fileIndex + ' · 第 ' + a.pageNo + ' 页' : '报告 ' + a.fileIndex;
-          if (c.state === 'borrowed') label += ' · 跨页';
+          var ds = String(c.obs.date || '');
+          if (/^\d{4}-\d{2}-\d{2}/.test(ds)) ds = ds.slice(5, 10);   // 只留月日，省地方
+          if (ds) label += ' · ' + ds;
           srcCell = '<button class="src-link" data-src="' + a.id + '">' + esc(label) + '</button>';
         }
       }
@@ -350,8 +325,7 @@
         low: '<span class="badge low">置信度低</span>',
         missing: '<span class="badge missing">必填缺失</span>',
         conflict: '<span class="badge conflict">两处不一致</span>',
-        absent: '<span class="badge absent">未提供</span>',
-        borrowed: '<span class="badge borrowed">跨页找回</span>'
+        absent: '<span class="badge absent">未提供</span>'
       }[c.state] || '';
 
       return '<tr class="' + c.state + '" data-ind="' + id + '">' +
@@ -613,7 +587,7 @@
     var added = 0, unmatched = [];
     items.forEach(function (it) {
       if (!it) return;
-      var hit = window.IndicatorLib.match(it.raw_name, it.indicator);
+      var hit = window.IndicatorLib.match(it.raw_name, it.indicator, it.unit);
       if (!hit || ids.indexOf(hit.id) === -1) {
         if (it.raw_name) unmatched.push(it.raw_name);
         return;
@@ -627,6 +601,7 @@
         indicatorId: hit.id,
         method: hit.method,
         score: hit.score,
+        warn: hit.warn || '',
         value: v,
         unit: it.unit || '',
         ref: it.ref || '',
@@ -1057,7 +1032,7 @@
 
   var STATE_NAME = {
     ok: '已识别', low: '置信度低', missing: '必填缺失',
-    conflict: '两处不一致', absent: '未提供', borrowed: '跨页找回'
+    conflict: '两处不一致', absent: '未提供'
   };
 
   function saveText(name, text, mime) {

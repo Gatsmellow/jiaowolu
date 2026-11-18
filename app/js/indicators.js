@@ -74,10 +74,10 @@
     num('UA',   '尿酸',   '肾功能', 'μmol/L', '208–428', 208, 428, ['尿酸', '血尿酸', 'UA', 'URIC']),
 
     // ---- 电解质 ----
-    num('NA', '钠',   '电解质', 'mmol/L', '137–147',   137,  147,  ['钠', '血钠', 'Na', 'Na+']),
-    num('K',  '钾',   '电解质', 'mmol/L', '3.5–5.3',   3.5,  5.3,  ['钾', '血钾', 'K', 'K+']),
-    num('CL', '氯',   '电解质', 'mmol/L', '99–110',    99,   110,  ['氯', '血氯', 'Cl', 'Cl-']),
-    num('CA', '钙',   '电解质', 'mmol/L', '2.11–2.52', 2.11, 2.52, ['钙', '血钙', 'Ca', 'Ca2+']),
+    num('NA', '钠',   '电解质', 'mmol/L', '137–147',   137,  147,  ['钠', '血钠', '钠离子', 'Na', 'Na+']),
+    num('K',  '钾',   '电解质', 'mmol/L', '3.5–5.3',   3.5,  5.3,  ['钾', '血钾', '钾离子', 'K', 'K+']),
+    num('CL', '氯',   '电解质', 'mmol/L', '99–110',    99,   110,  ['氯', '血氯', '氯离子', 'Cl', 'Cl-']),
+    num('CA', '钙',   '电解质', 'mmol/L', '2.11–2.52', 2.11, 2.52, ['钙', '血钙', '钙离子', 'Ca', 'Ca2+']),
 
     // ---- 血糖（综合生化里常见，单独成项） ----
     num('GLU', '葡萄糖', '生化', 'mmol/L', '3.9–6.1', 3.9, 6.1, ['葡萄糖', '血糖', '空腹血糖', 'GLU', 'Glu', 'FPG'])
@@ -159,25 +159,92 @@
     return state.pages.filter(function (p) { return p.id === id; })[0] || null;
   }
 
-  /* 把报告上的原文项目名对到标准指标。对不上返回 null，绝不猜。 */
-  function match(rawName, hint) {
-    if (hint && BY_ID[hint]) return { id: hint, method: 'text-model', score: 1 };
-    var n = normalize(rawName);
-    if (!n) return null;
-    if (ALIAS_INDEX[n]) return { id: ALIAS_INDEX[n], method: 'exact-alias', score: 1 };
+  /* 报告上的项目名常带方法学后缀，如「肌酐（酶法）」「葡萄糖(干化学)」。
+     先剥掉括号里的方法学说明，再做匹配——这一步能消掉大部分对不上的情况。 */
+  var METHOD_HINT = /法|酶|化学|免疫|比色|速率|终点|电极|干片|荧光|散射|层析|仪器/;
 
-    // 包含匹配只在别名够长时做：两三个字母的代号（PT、TT、K）当子串用会串项，
-    // 比如 "APTT" 里就含着一个 "PT"。
-    var best = null;
-    Object.keys(ALIAS_INDEX).forEach(function (k) {
-      if (k.length < 3) return;
-      if (n.indexOf(k) !== -1 || k.indexOf(n) !== -1) {
-        var score = Math.min(k.length, n.length) / Math.max(k.length, n.length);
-        if (!best || score > best.score) best = { id: ALIAS_INDEX[k], method: 'contains', score: score };
-      }
-    });
-    return best && best.score >= 0.45 ? best : null;
+  function stripMethod(s) {
+    return String(s == null ? '' : s)
+      .replace(/[（(【\[][^）)】\]]*[）)】\]]/g, function (m) {
+        return METHOD_HINT.test(m) ? '' : m;
+      })
+      .replace(/(测定|检测|定量|定性)$/g, '');
   }
+
+  /* 把名字切成"词"，只在完整的词上比较，绝不用子串。
+   * 为什么不能用子串：APTT 里含着 PT、hs-CRP 里含着 CRP、FIB-4 里含着 FIB、
+   * 氨基转移酶同时出现在 ALT 和 AST 的全名里。子串匹配会把它们对错，
+   * 而且是悄悄对错——错配的值会显示成绿色，没人会去查。
+   * 连字符保留在词内，所以 "FIB-4" 是一个词，不会被拆出 "FIB"。 */
+  function words(s) {
+    return String(s == null ? '' : s)
+      .toLowerCase()
+      .split(/[^a-z0-9\u4e00-\u9fa5\-]+/)
+      .filter(function (w) { return w && !/^[0-9\-]+$/.test(w); });
+  }
+
+  /* 单位只做"量纲"级别的粗比对，不比具体写法（10^9/L 与 ×10^9/L 视为同一类）。 */
+  function unitFamily(u) {
+    var s = String(u == null ? '' : u)
+      .toLowerCase().replace(/[\s\u3000]/g, '').replace(/[μµ]/g, 'u').replace(/×/g, '');
+    if (!s) return '';
+    if (s.indexOf('%') >= 0) return 'pct';
+    if (/mol\/l/.test(s)) return 'molar';
+    if (/(g|mg|ug|ng)\/(d)?l/.test(s)) return 'mass';
+    if (/10\^?[0-9]*\/l/.test(s) || /\/ul/.test(s)) return 'count';
+    if (/^(u|iu|mu|miu)\/(ml|l|dl)$/.test(s)) return 'activity';
+    if (/\/(min|s|h)$/.test(s)) return 'time';
+    return '';
+  }
+
+  /* 量纲对不上就不认。这是最便宜的一道校验：血钙是 mmol/L，CA125 是 U/mL，
+     单位一挡，这类错配根本到不了界面上。两边有一边认不出量纲就放行。 */
+  function unitFits(ind, unit) {
+    if (!ind || (ind.type || 'num') !== 'num') return true;
+    var a = unitFamily(unit);
+    var b = unitFamily(ind.unit);
+    if (!a || !b) return true;
+    return a === b;
+  }
+
+  /* 把报告上的原文项目名对到标准指标。对不上就返回 null —— 宁可漏，不可猜。 */
+  function match(rawName, hint, unit) {
+    var raw = stripMethod(rawName);
+
+    // 第一优先：模型给的代号。模型看得到单位、参考范围和同一页的相邻项目，
+    // 比字符串可靠得多。但名字对不上的时候，单位是唯一还能验的一道关：
+    // 它说这是"钙"（mmol/L），报告上写的却是 U/mL，那多半是把 CA125 认成钙了。
+    if (hint && BY_ID[hint]) {
+      var hf = unitFamily(unit), wf = unitFamily(BY_ID[hint].unit);
+      if (hf && wf && hf !== wf) return null;
+      return { id: hint, method: 'text-model', score: 1 };
+    }
+
+    var n = normalize(raw);
+    if (!n) return null;
+
+    var hits = [];
+    if (ALIAS_INDEX[n]) hits.push({ id: ALIAS_INDEX[n], method: 'exact-alias', score: 1 });
+
+    if (!hits.length) {
+      words(raw).forEach(function (w) {
+        if (w.length < 2) return;
+        if (ALIAS_INDEX[w]) hits.push({ id: ALIAS_INDEX[w], method: 'token', score: 0.9 });
+      });
+    }
+
+    // 命中两个以上不同指标 = 有歧义，一个都不认，交给人。
+    var seen = {};
+    hits.forEach(function (h) { seen[h.id] = 1; });
+    if (Object.keys(seen).length !== 1) return null;
+
+    var hit = hits[0];
+    // 名字对得上、单位对不上：项目是对的，但可能换了单位（mg/dL 与 mmol/L）。
+    // 这种情况不丢值，只降级成"存疑"，让人看一眼。
+    if (!unitFits(BY_ID[hit.id], unit)) hit.warn = 'unit';
+    return hit;
+  }
+
 
   /* ---------------- 指标增删改 ---------------- */
 
