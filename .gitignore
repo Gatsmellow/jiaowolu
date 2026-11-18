@@ -17,7 +17,8 @@ node_modules/
 app/test/real/
 
 # 比赛材料与本地导出，留在本机即可
-docs/
+docs/*
+!docs/figs/
 att1*.txt
 att2*.txt
 vendor/pdf-toolkit/
