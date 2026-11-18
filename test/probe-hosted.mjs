@@ -66,7 +66,7 @@ try {
   await send('Page.enable');
   await send('Runtime.enable');
   await send('Page.navigate', { url: APP });
-  await sleep(3500);
+  await sleep(4500);
 
   const state = await evaluate(`({
     href: location.href,
