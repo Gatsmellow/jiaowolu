@@ -220,8 +220,10 @@
       return { state: isRequired(indId) ? 'missing' : 'absent', obs: list[0] || null, list: list };
     }
 
-    // 不同报告之间对不上，才算真冲突
-    if (picked.length > 1) {
+    // 不同报告之间对不上，才算真冲突。
+    // 只对数值项判冲突：文本项（诊断）和日期项（就诊日期）在不同次就诊的报告里
+    // 本来就可能不同，把它们报成"两处不一致"只会制造噪音。
+    if (isNum && picked.length > 1) {
       var first = picked[0];
       var diff = picked.some(function (o) { return !sameValue(o.value, first.value, isNum); });
       if (diff) return { state: 'conflict', obs: first, list: picked };
@@ -904,6 +906,8 @@
         '<button class="tab' + (libTab === 'ind' ? ' active' : '') + '" data-tab="ind">指标库 <b>' + inds.length + '</b></button>' +
         '<button class="tab' + (libTab === 'page' ? ' active' : '') + '" data-tab="page">页面 <b>' + pages.length + '</b></button>' +
         '<div class="tabs-right">' +
+          '<button class="link tiny" data-act="lib-export">导出配置</button>' +
+          '<button class="link tiny" data-act="lib-import">导入配置</button>' +
           '<button class="btn tiny primary" data-act="' + (libTab === 'ind' ? 'ind-new' : 'page-new') + '">+ ' +
             (libTab === 'ind' ? '新建指标' : '新建页面') + '</button>' +
         '</div>' +
@@ -980,7 +984,9 @@
     }
 
     try {
-      if (act === 'ind-new') { libForm = { kind: 'ind', mode: 'new' }; renderLibrary(); }
+      if (act === 'lib-export') { exportLibrary(); return; }
+      else if (act === 'lib-import') { importLibrary(); return; }
+      else if (act === 'ind-new') { libForm = { kind: 'ind', mode: 'new' }; renderLibrary(); }
       else if (act === 'ind-edit') { libForm = { kind: 'ind', mode: 'edit', id: id }; renderLibrary(); }
       else if (act === 'ind-cancel') { libForm = null; renderLibrary(); }
       else if (act === 'ind-save') {
@@ -1011,7 +1017,8 @@
         if (libForm.mode === 'edit') window.Library.updatePage(libForm.id, payload);
         else {
           var np = window.Library.addPage(payload);
-          selected = (selected || []).concat([np.id]);
+          var sel0 = loadSelected();
+          if (sel0.ids.indexOf(np.id) === -1) sel0.ids.push(np.id);
           saveSelected();
         }
         libChangeDone('页面已保存');
@@ -1021,7 +1028,9 @@
       else if (act === 'page-del') {
         if (!confirm('删除这个页面？指标本身不会被删除。')) return;
         window.Library.removePage(id);
-        selected = (selected || []).filter(function (x) { return x !== id; });
+        var sel1 = loadSelected();
+        sel1.ids = sel1.ids.filter(function (x) { return x !== id; });
+        sel1.req = sel1.req.filter(function (x) { return x !== id; });
         saveSelected();
         libChangeDone('已删除');
         renderLibrary();
@@ -1046,12 +1055,132 @@
 
   /* ---------------- 导出 ---------------- */
 
+  var STATE_NAME = {
+    ok: '已识别', low: '置信度低', missing: '必填缺失',
+    conflict: '两处不一致', absent: '未提供', borrowed: '跨页找回'
+  };
+
+  function saveText(name, text, mime) {
+    var blob = new Blob([text], { type: mime || 'application/json;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  /* 导出成结构化 JSON：给下游用（入库、二次核对、写论文附录）。
+   * 和 CSV 的区别是 CSV 只导当前患者，JSON 导全部患者并保留来源与置信度。 */
+  function collectRows(pid) {
+    return targetIds().map(function (id) {
+      var ind = window.IndicatorLib.byId(id);
+      if (!ind) return null;
+      var c = cellState(pid, id);
+      var a = c.obs && c.obs.assetId
+        ? S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0]
+        : null;
+      return {
+        code: ind.id, name: ind.name, type: ind.type || 'num',
+        value: c.obs ? c.obs.value : '', unit: ind.unit || '', ref: ind.ref || '',
+        state: c.state, stateName: STATE_NAME[c.state] || '',
+        source: a ? (a.kind === 'pdf' ? '报告' + a.fileIndex + '-第' + a.pageNo + '页' : '报告' + a.fileIndex) : '',
+        sourceType: a && a.reportType ? a.reportType : '',
+        confidence: c.obs && c.obs.confidence != null ? c.obs.confidence : null
+      };
+    }).filter(Boolean);
+  }
+
+  function exportJson() {
+    if (!S.patients.length) { toast('没有可导出的内容', 'err'); return; }
+    var pages = window.Library.pages();
+    var out = {
+      app: 'jiaowolu',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      pages: pages.filter(function (p) { return selected.ids.indexOf(p.id) >= 0; })
+        .map(function (p) { return { id: p.id, name: p.name }; }),
+      requiredPages: pages.filter(function (p) { return selected.req.indexOf(p.id) >= 0; })
+        .map(function (p) { return { id: p.id, name: p.name }; }),
+      patients: S.patients.map(function (p) {
+        return {
+          code: p.code,
+          reports: assetsOf(p.id).map(function (a) {
+            return { file: a.sourceName || '', page: a.pageNo || null, type: a.reportType || '', date: a.reportDate || '' };
+          }),
+          rows: collectRows(p.id)
+        };
+      })
+    };
+    saveText('交我录-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(out, null, 2));
+    toast('已导出 JSON：' + out.patients.length + ' 位患者');
+  }
+
+  /* ---------------- 指标与页面的配置导入导出 ----------------
+   * 这是"可分享的模板"能成立的前提：一所医院把指标和页面配好，导出成 JSON
+   * 发给另一所，对方导入即可用同一套要求。 */
+  function exportLibrary() {
+    var cfg = {
+      app: 'jiaowolu', kind: 'library', version: 1,
+      exportedAt: new Date().toISOString(),
+      indicators: window.Library.indicators(),
+      pages: window.Library.pages()
+    };
+    saveText('交我录-指标与页面-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(cfg, null, 2));
+    toast('已导出 ' + cfg.indicators.length + ' 个指标、' + cfg.pages.length + ' 个页面');
+  }
+
+  function applyLibrary(cfg) {
+    var L = window.Library;
+    // 顺序不能反：页面要用指标代号做校验，所以指标必须先落地
+    L.pages().slice().forEach(function (p) { L.removePage(p.id); });
+    L.indicators().slice().forEach(function (i) { L.removeIndicator(i.id); });
+    (cfg.indicators || []).forEach(function (i) {
+      L.addIndicator({
+        id: i.id, name: i.name, group: i.group, type: i.type || 'num',
+        unit: i.unit, ref: i.ref, aliases: i.aliases
+      });
+    });
+    (cfg.pages || []).forEach(function (p) { L.addPage({ name: p.name, ids: p.ids || [] }); });
+  }
+
+  function importLibrary() {
+    var inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.json,application/json';
+    inp.onchange = function () {
+      var f = inp.files && inp.files[0];
+      if (!f) return;
+      var r = new FileReader();
+      r.onload = function () {
+        var cfg;
+        try { cfg = JSON.parse(String(r.result)); } catch (e) { toast('这个文件不是合法的 JSON', 'err'); return; }
+        if (!cfg || !Array.isArray(cfg.indicators) || !cfg.indicators.length) {
+          toast('文件里没有找到指标列表', 'err'); return;
+        }
+        var n = cfg.indicators.length, m = (cfg.pages || []).length;
+        if (!window.confirm('导入会用它里面的 ' + n + ' 个指标和 ' + m + ' 个页面替换当前设置。\n当前设置可以在导入前先导出备份。继续吗？')) return;
+        try {
+          applyLibrary(cfg);
+        } catch (e) {
+          toast('导入失败：' + (e.message || e), 'err');
+          return;
+        }
+        toast('已导入 ' + n + ' 个指标、' + m + ' 个页面');
+        renderAll();
+        renderLibrary();
+      };
+      r.readAsText(f, 'utf-8');
+    };
+    inp.click();
+  }
+
   function exportCsv() {
     var p = current();
     if (!p) { toast('没有可导出的内容', 'err'); return; }
     var ids = targetIds();
     var head = ['患者', '指标代号', '指标名称', '结果', '单位', '参考范围', '状态', '来源'];
-    var stateName = { ok: '已识别', low: '置信度低', missing: '必填缺失', conflict: '两处不一致', absent: '未提供' };
+    var stateName = STATE_NAME;
 
     var rows = ids.map(function (id) {
       var ind = window.IndicatorLib.byId(id);
@@ -1187,6 +1316,7 @@
 
     $('#btn-run').addEventListener('click', runRecognize);
     $('#btn-export').addEventListener('click', exportCsv);
+    $('#btn-export-json').addEventListener('click', exportJson);
     $('#btn-settings').addEventListener('click', openSettings);
 
     var btnReconnect = $('#btn-reconnect');
