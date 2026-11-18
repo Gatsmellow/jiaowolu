@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const PORT = 9333;
-const APP = 'http://127.0.0.1:8765/';
+const APP = process.env.JW_APP || 'http://127.0.0.1:8765/';
 
 const key = (() => {
   try {
@@ -145,7 +145,13 @@ async function main() {
     `);
     await cdp.send('Page.reload');
     await cdp.waitForLoad();
-    await sleep(400);
+    // 托管版要把 3 MB 的 PDF.js 从网上拉下来，__S 不一定立刻就绪，等它出现再动手
+    for (let i = 0; i < 40; i++) {
+      const ready = await cdp.eval('typeof window.__S === "object" && window.__S !== null');
+      if (ready) break;
+      await sleep(250);
+    }
+    await sleep(300);
 
     console.log('[3/6] 拖入三份报告（病程首页 / 血常规 / 生化），把血常规与综合生化标成必填');
     await cdp.eval(`
@@ -160,7 +166,7 @@ async function main() {
 
         const files = [];
         for (const name of ['course-20261110.jpg', 'cbc-20261110.jpg', 'bio-20261110.jpg']) {
-          const blob = await (await fetch('/test/samples/' + name)).blob();
+          const blob = await (await fetch('test/samples/' + name)).blob();
           files.push(new File([blob], name, { type: 'image/jpeg' }));
         }
         const dt = new DataTransfer();
