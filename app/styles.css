@@ -239,6 +239,52 @@ body {
 }
 .asset-strip:empty { display: none; }
 
+/* 时间轴：按就诊日期切换 */
+.date-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 2px 10px;
+}
+.date-bar[hidden] { display: none; }
+.date-label {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: .04em;
+}
+.date-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 12px;
+  cursor: pointer;
+}
+.date-chip:hover { border-color: #c7d2e2; }
+.date-chip.on {
+  background: #eef3fc;
+  border-color: #b9cdea;
+  color: #1b4c96;
+  font-weight: 600;
+}
+.date-chip .dc-note { font-size: 10px; color: var(--muted); font-weight: 400; }
+.date-chip.on .dc-note { color: #4a6ea8; }
+.date-hint {
+  border: 0;
+  background: none;
+  color: #8a93a2;
+  font-size: 11px;
+  padding: 0 2px;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+.date-hint:hover { color: var(--blue); }
+
 .asset {
   flex: 0 0 auto;
   width: 104px;

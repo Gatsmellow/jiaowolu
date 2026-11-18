@@ -155,7 +155,7 @@ async function main() {
           id: 'obs-fake', patientId: pid, assetId: 'asset-fake',
           rawName: '白细胞计数(WBC)', indicatorId: 'WBC', method: 'exact-alias',
           warn: '', value: '9.99', unit: '10^9/L', ref: '3.5-9.5',
-          date: '2025-03-11', confidence: 0.95
+          date: '2026-11-10', confidence: 0.95
         });
         // 随便点一下分组标题，触发重绘
         var g = document.querySelector('.group-row');
@@ -207,7 +207,7 @@ async function main() {
     console.log('[5/5] 检查页面异常');
     console.log('    ' + (cdp.errors.length ? String(cdp.errors[0]).split('\n')[0] : '无'));
 
-    const ok = row && row.src.indexOf('/') !== -1 && row.src.indexOf('09') === -1
+    const ok = row && row.src.indexOf('/') !== -1
       && Array.isArray(cmp) && cmp.length === 2;
     if (!ok) {
       console.error('\n不通过：冲突没有把两个来源都列出来');

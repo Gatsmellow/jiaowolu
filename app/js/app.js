@@ -46,6 +46,7 @@
     assets: [],
     observations: [],
     running: false,
+    dateFilter: '',            // 时间轴：只看某一次就诊（'' = 全部，取最近一次的值）
     collapse: {},              // 页面分组是展开还是收起，用户点过就记住
     seq: { patient: 0, asset: 0, obs: 0 }
   };
@@ -257,34 +258,74 @@
       var better = !cur || (o.confidence == null ? 0 : o.confidence) > (cur.confidence == null ? 0 : cur.confidence);
       if (better) byAsset[o.assetId] = o;
     });
-    var picked = Object.keys(byAsset).map(function (k) { return byAsset[k]; })
+    var all = Object.keys(byAsset).map(function (k) { return byAsset[k]; })
       .filter(function (o) { return String(o.value || '').trim() !== ''; });
+
+    // 时间轴：同一个人住过几次院，每次的值本来就该不一样，那不是"对不上"。
+    var dates = [];
+    all.forEach(function (o) {
+      var d = obsDate(o);
+      if (d && dates.indexOf(d) === -1) dates.push(d);
+    });
+    dates.sort();
+
+    var picked = S.dateFilter
+      ? all.filter(function (o) { return obsDate(o) === S.dateFilter; })
+      : all;
 
     // 没识别到：只有标了必填的才算质控问题，其余只是"这次没提供"
     if (!picked.length) {
-      return { state: isRequired(indId) ? 'missing' : 'absent', obs: list[0] || null, list: list };
+      return {
+        state: isRequired(indId) ? 'missing' : 'absent',
+        obs: list[0] || null, list: list, dates: dates
+      };
     }
 
-    // 不同报告之间对不上，才算真冲突。
-    // 只对数值项判冲突：文本项（诊断）和日期项（就诊日期）在不同次就诊的报告里
-    // 本来就可能不同，把它们报成"两处不一致"只会制造噪音。
-    if (isNum && picked.length > 1) {
-      var first = picked[0];
-      var diff = picked.some(function (o) { return !sameValue(o.value, first.value, isNum); });
-      if (diff) return { state: 'conflict', obs: first, list: picked };
+    // 冲突只在同一次就诊内判：同一天两份报告给了两个值，那才是真对不上。
+    // 不同日期之间的差异走时间轴，不标红。
+    var byDate = {};
+    picked.forEach(function (o) {
+      var d = obsDate(o);
+      (byDate[d] = byDate[d] || []).push(o);
+    });
+    var conflictList = null;
+    Object.keys(byDate).forEach(function (d) {
+      var g = byDate[d];
+      if (conflictList || g.length < 2) return;
+      var first = g[0];
+      var diff = g.some(function (o) { return !sameValue(o.value, first.value, isNum); });
+      if (diff) conflictList = g;
+    });
+    if (conflictList) {
+      return { state: 'conflict', obs: conflictList[0], list: conflictList, dates: dates };
     }
 
-    var o = picked[0];
+    // 没有冲突时，取最近一次就诊的那条；同一日期内取置信度最高的。
+    var sorted = picked.slice().sort(function (a, b) {
+      var da = obsDate(a), db = obsDate(b);
+      if (da !== db) return da < db ? 1 : -1;
+      return (b.confidence == null ? 0 : b.confidence) - (a.confidence == null ? 0 : a.confidence);
+    });
+    var o = sorted[0];
+    var extra = { obs: o, list: sorted, dates: dates };
+
     if (o.warn === 'unit') {
       // 项目认出来了，但单位跟标准库不是一类（比如报告用 mg/dL、库里是 mmol/L）。
       // 不丢值，标成存疑，让人确认要不要换算。
-      return { state: 'low', obs: o, list: picked };
+      extra.state = 'low';
+      return extra;
     }
     if (o.method !== 'manual' && o.confidence != null && o.confidence < LOW_CONFIDENCE) {
-      return { state: 'low', obs: o, list: picked };
+      extra.state = 'low';
+      return extra;
     }
 
-    return { state: 'ok', obs: o, list: picked };
+    extra.state = 'ok';
+    return extra;
+  }
+
+  function obsDate(o) {
+    return String((o && o.date) || '').trim();
   }
 
   /* ---------------- 渲染：患者 ---------------- */
@@ -397,6 +438,8 @@
     var sel = loadSelected();
     var tgt = targetIds();
 
+    renderDateBar();
+
     // 指标按"第一个包含它的已选页面"归组；同一个指标出现在多个页面里（综合生化）
     // 只在第一处出现一次，免得同一项在表里重复两遍。
     var own = {};
@@ -462,6 +505,12 @@
           }
         }
 
+        // 这个指标在别的就诊日期上还有值：提醒一下"还有几次"，免得以为只有这一次
+        if (!S.dateFilter && c.dates && c.dates.length > 1) {
+          srcCell += ' <button class="date-hint" data-cmp="' + esc(r.id) + '" ' +
+            'title="点开看每次就诊的值">另有 ' + (c.dates.length - 1) + ' 次</button>';
+        }
+
         return '<tr class="' + c.state + '"' + (collapsed ? ' hidden' : '') + ' data-ind="' + r.id + '">' +
           '<td><div class="ind-name"><span class="ind-dot ' + c.state + '"></span>' +
             '<div><div>' + esc(ind.name) + '</div><div class="ind-code">' + esc(ind.id) + '</div></div></div></td>' +
@@ -489,6 +538,44 @@
     renderAssets();
     renderStats();
     renderTable();
+  }
+
+  /* ---------------- 时间轴 ---------------- */
+
+  // 把一个患者身上出现过的就诊日期列出来，让人可以只看某一次。
+  // 没有日期（手工填的、单据上没读到）的不进时间轴。
+  function timelineDates(pid) {
+    var seen = {}, out = [];
+    S.observations.forEach(function (o) {
+      if (o.patientId !== pid) return;
+      var d = obsDate(o);
+      if (!d || seen[d]) return;
+      seen[d] = 1;
+      out.push(d);
+    });
+    return out.sort();
+  }
+
+  function renderDateBar() {
+    var bar = $('#date-bar');
+    var p = current();
+    var dates = p ? timelineDates(p.id) : [];
+    if (dates.length < 2) {
+      bar.hidden = true;
+      bar.innerHTML = '';
+      if (dates.length < 2 && S.dateFilter) S.dateFilter = '';
+      return;
+    }
+    if (S.dateFilter && dates.indexOf(S.dateFilter) === -1) S.dateFilter = '';
+    bar.hidden = false;
+    bar.innerHTML =
+      '<span class="date-label">时间轴</span>' +
+      '<button class="date-chip' + (S.dateFilter ? '' : ' on') + '" data-date="">全部<span class="dc-note">取最近一次</span></button>' +
+      dates.map(function (d) {
+        var n = S.observations.filter(function (o) { return o.patientId === p.id && obsDate(o) === d; }).length;
+        return '<button class="date-chip' + (S.dateFilter === d ? ' on' : '') + '" data-date="' + esc(d) + '">' +
+          esc(d) + '<span class="dc-note">' + n + ' 项</span></button>';
+      }).join('');
   }
 
   /* ---------------- 患者 ---------------- */
@@ -1030,16 +1117,22 @@
         '</tr>';
     }).join('');
 
+    var isConflict = c.state === 'conflict';
+    var span = c.dates && c.dates.length > 1;
+
     openModal(
-      '<h3>' + esc(ind.name) + ' · 两处不一致</h3>' +
-      '<p class="note">同一个指标，在不同报告里读到了不同的值。常见原因有三种：' +
-      '这两份报告不是同一天做的；其中一份不是检验单（比如出院记录正文里顺带提到过这个数）；' +
-      '或者确实读错了。</p>' +
+      '<h3>' + esc(ind.name) + (isConflict ? ' · 同一次就诊里对不上' : ' · 各次就诊的值') + '</h3>' +
+      '<p class="note">' + (isConflict
+        ? '同一次就诊的两份报告给了不同的值，那才是真的对不上。常见原因：其中一份不是检验单（比如出院记录正文里顺带提到过这个数），或者确实读错了。'
+        : '这个指标在不同日期的报告里都有值。同一个人住过几次院，每次的数本来就不一样，所以不算"对不上"；' +
+          '表格里默认显示最近一次，想只看某一次可以点上面的时间轴。') + '</p>' +
       '<table class="mini-grid cmp-table"><thead><tr>' +
         '<th>来源</th><th>读到的值</th><th>参考范围</th><th>原文项目名</th><th></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>' +
-      '<p class="note">以哪一份为准由你判断。点"以此为准"，其余来源会被丢掉，这一项立即变成已识别；' +
-      '也可以直接回到表格里改这个值。</p>',
+      (isConflict
+        ? '<p class="note">点"以此为准"，其余来源会被丢掉，这一项立即变成已识别；也可以直接回到表格里改这个值。</p>'
+        : (span ? '<p class="note">这里只做对照，不用裁决——它们本来就是不同时间的两次检查。</p>' : '')) +
+      '',
       'wide'
     );
   }
@@ -1630,6 +1723,14 @@
       if (cmp) { openCompare(cmp.getAttribute('data-cmp')); return; }
       var b = e.target.closest('[data-src]');
       if (b) openSource(b.getAttribute('data-src'));
+    });
+
+    $('#date-bar').addEventListener('click', function (e) {
+      var chip = e.target.closest('.date-chip');
+      if (!chip) return;
+      S.dateFilter = chip.getAttribute('data-date') || '';
+      renderDateBar();
+      renderTable();
     });
 
     $('#asset-strip').addEventListener('click', function (e) {
