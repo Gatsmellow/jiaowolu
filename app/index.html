@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交我录 · 检验报告录入前质控</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">交</div>
+    <div class="brand-text">
+      <h1>交我录</h1>
+      <p>检验报告录入前质控</p>
+    </div>
+  </div>
+  <div class="top-right">
+    <span id="model-pill" class="pill pill-idle">模型未配置</span>
+    <button id="btn-settings" class="btn ghost">设置</button>
+  </div>
+</header>
+
+<main class="layout">
+  <aside class="side">
+    <section class="side-block">
+      <label class="side-label">
+        本次需要
+        <button id="btn-library" class="link tiny">指标与页面</button>
+      </label>
+      <div id="page-checks" class="page-checks"></div>
+    </section>
+
+    <section class="side-block">
+      <label class="side-label">质控概览</label>
+      <div id="stats" class="stats"></div>
+    </section>
+
+    <section class="side-block grow">
+      <label class="side-label">患者批次</label>
+      <div id="patient-list" class="patient-list"></div>
+      <button id="btn-add-patient" class="btn tiny ghost wide">+ 添加患者</button>
+    </section>
+
+    <section class="side-block actions">
+      <button id="btn-run" class="btn primary wide">开始识别</button>
+      <button id="btn-export" class="btn ghost wide">导出 CSV</button>
+      <button id="btn-reset" class="btn ghost wide danger">清空本次任务</button>
+      <p class="hint">报告只在你自己的浏览器里解析。点"开始识别"时，页面图片会发送到你配置的模型服务，不经过我们的服务器。</p>
+    </section>
+  </aside>
+
+  <section class="work">
+    <div class="work-head">
+      <div>
+        <h2 id="patient-title">尚无患者</h2>
+        <p id="patient-sub" class="muted">先添加一位患者，再上传其名下的报告</p>
+      </div>
+      <div class="work-actions">
+        <label class="btn primary file-btn">
+          上传报告
+          <input id="file-input" type="file" multiple accept="image/*,application/pdf" hidden>
+        </label>
+      </div>
+    </div>
+
+    <div id="dropzone" class="dropzone">
+      <input id="drop-input" type="file" multiple accept="image/*,application/pdf" hidden>
+      <p id="dz-title" class="dz-title">把报告图片或 PDF 拖到这里</p>
+      <p class="dz-sub">支持 JPG / PNG / PDF；一位患者的报告一次传完，不必按检查类别排序</p>
+      <button id="dz-pick" class="btn tiny ghost">选择文件</button>
+    </div>
+
+    <div id="asset-strip" class="asset-strip"></div>
+
+    <div class="table-wrap">
+      <table class="grid">
+        <thead>
+          <tr>
+            <th class="col-name">指标</th>
+            <th class="col-value">结果</th>
+            <th class="col-unit">单位</th>
+            <th class="col-ref">参考范围</th>
+            <th class="col-src">来源</th>
+          </tr>
+        </thead>
+        <tbody id="grid-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<div id="modal" class="modal" hidden>
+  <div id="modal-box" class="modal-box"></div>
+</div>
+
+<div id="offline-bar" class="offline-bar" hidden>
+  <span id="offline-text">本地服务已断开，上传和识别会失败</span>
+  <button id="btn-reconnect" type="button">重试</button>
+</div>
+
+<script src="vendor/pdfjs/pdf.min.js"></script>
+<script src="vendor/pdf-tools.js"></script>
+<script src="js/indicators.js"></script>
+<script src="js/model.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

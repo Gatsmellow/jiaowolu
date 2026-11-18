@@ -1,0 +1,158 @@
+"""生成合成报告单，用来跑通链路、也用来做演示数据。
+
+刻意埋了几处真实的"脏"：
+  - 血常规那张**没有血红蛋白**（标了必填才会红）
+  - 生化那张把"丙氨酸氨基转移酶"写成**谷丙转氨酶**、把"葡萄糖"写成**空腹血糖**（同义词，考验对齐）
+  - 生化那张**没有尿酸**
+  - 病程首页是文本/日期字段，不是化验数值
+
+页面结构按科室真实登记表来：病程首页 / 血常规 / 出凝血 / 肝功能 / 肾功能 / 电解质。
+"""
+from __future__ import annotations
+
+import os
+
+from PIL import Image, ImageDraw, ImageFont
+
+W = 1240
+S = 2
+FONT = r"C:\Windows\Fonts\msyh.ttc"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(ROOT, "app", "test", "samples")
+
+INK = "#1a1a1a"
+GREY = "#5a5a5a"
+LINE = "#9aa0a6"
+
+
+def f(size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(FONT, size * S)
+
+
+def make_report(
+    filename: str,
+    title: str,
+    rows: list[tuple[str, str, str, str]],
+    date: str,
+    heads: tuple[str, str, str, str] = ("项目名称", "结果", "单位", "参考范围"),
+) -> None:
+    H = max(1140, 470 + len(rows) * 62 + 210)
+    img = Image.new("RGB", (W * S, H * S), "white")
+    d = ImageDraw.Draw(img)
+
+    def t(x, y, s, size=24, fill=INK, anchor="la"):
+        d.text((x * S, y * S), s, font=f(size), fill=fill, anchor=anchor)
+
+    def line(x0, y0, x1, y1, fill=LINE, w=1):
+        d.line([(x0 * S, y0 * S), (x1 * S, y1 * S)], fill=fill, width=w * S)
+
+    # 抬头
+    t(W // 2, 54, "上海市某三甲医院", 40, INK, anchor="ma")
+    t(W // 2, 112, title, 30, INK, anchor="ma")
+    line(70, 168, W - 70, 168, INK, 2)
+
+    # 患者信息
+    t(80, 190, "姓　名：张建国", 24)
+    t(420, 190, "性　别：男", 24)
+    t(620, 190, "年　龄：52 岁", 24)
+    t(860, 190, "样本号：20261110A0371", 24)
+    t(80, 232, "科　别：内科门诊", 24)
+    t(420, 232, "样本类型：静脉血", 24)
+    t(700, 232, "申请医生：陈 敏", 24)
+    t(80, 274, "采集时间：" + date, 24)
+    t(620, 274, "报告时间：" + date, 24)
+    line(70, 316, W - 70, 316)
+
+    # 表头
+    cols = [90, 470, 700, 900]
+    for x, h in zip(cols, heads):
+        if h:
+            t(x, 338, h, 25, GREY)
+    line(70, 382, W - 70, 382, INK, 2)
+
+    # 行
+    y = 406
+    for name, value, unit, ref in rows:
+        t(cols[0], y, name, 25)
+        t(cols[1], y, value, 25)
+        if unit:
+            t(cols[2], y, unit, 25)
+        if ref:
+            t(cols[3], y, ref, 25)
+        line(70, y + 40, W - 70, y + 40, "#dcdcdc")
+        y += 62
+
+    # 页脚
+    line(70, H - 160, W - 70, H - 160)
+    t(80, H - 140, "检验者：李　静", 22, GREY)
+    t(420, H - 140, "审核者：王丽华", 22, GREY)
+    t(80, H - 104, "说明：本报告仅对所检标本负责；参考范围为本实验室成人参考区间。", 21, GREY)
+    t(80, H - 70, "如有疑问请于工作时间联系检验科。", 21, GREY)
+
+    os.makedirs(OUT, exist_ok=True)
+    path = os.path.join(OUT, filename)
+    img.resize((W, H), Image.LANCZOS).save(path, "JPEG", quality=92)
+    print("saved", path, W, "x", H)
+
+
+def main() -> None:
+    # 1) 病程首页：文本 + 日期，不是化验单
+    make_report(
+        "course-20261110.jpg",
+        "住院病历首页（摘录）",
+        [
+            ("姓名", "张建国", "", ""),
+            ("性别", "男", "", ""),
+            ("住院号", "ZY2026110037", "", ""),
+            ("年龄", "52", "岁", ""),
+            ("就诊日期", "2026-11-05", "", ""),
+            ("诊断结果", "弥漫大B细胞淋巴瘤", "", ""),
+            ("民族", "汉族", "", ""),
+            ("就诊医院", "上海市某三甲医院", "", ""),
+        ],
+        "2026-11-05 09:30",
+        heads=("项目", "内容", "", ""),
+    )
+
+    # 2) 血常规：血红蛋白故意留空
+    make_report(
+        "cbc-20261110.jpg",
+        "血常规检验报告单",
+        [
+            ("白细胞计数 (WBC)", "7.24", "10^9/L", "3.5-9.5"),
+            ("红细胞计数 (RBC)", "4.86", "10^12/L", "4.3-5.8"),
+            # 血红蛋白故意留空
+            ("血小板计数 (PLT)", "231", "10^9/L", "125-350"),
+            ("淋巴细胞计数", "1.62", "10^9/L", "1.1-3.2"),
+        ],
+        "2026-11-10 08:12",
+    )
+
+    # 3) 生化（综合）：同义词拆分 + 缺尿酸
+    make_report(
+        "bio-20261110.jpg",
+        "生化检验报告单",
+        [
+            ("谷丙转氨酶", "38", "U/L", "9-50"),
+            ("天冬氨酸氨基转移酶", "29", "U/L", "15-40"),
+            ("碱性磷酸酶", "76", "U/L", "35-100"),
+            ("γ-谷氨酰转肽酶", "24", "U/L", "7-45"),
+            ("乳酸脱氢酶", "188", "U/L", "120-250"),
+            ("总胆红素", "14.6", "μmol/L", "3.4-20.5"),
+            ("直接胆红素", "4.1", "μmol/L", "0-6.8"),
+            ("白蛋白", "44.2", "g/L", "40-55"),
+            ("尿素氮", "5.3", "mmol/L", "3.1-8.0"),
+            ("肌酐", "82", "μmol/L", "57-97"),
+            # 尿酸故意留空
+            ("空腹血糖", "5.4", "mmol/L", "3.9-6.1"),
+            ("钠", "141", "mmol/L", "137-147"),
+            ("钾", "4.1", "mmol/L", "3.5-5.3"),
+            ("氯", "103", "mmol/L", "99-110"),
+            ("钙", "2.31", "mmol/L", "2.11-2.52"),
+        ],
+        "2026-11-10 08:12",
+    )
+
+
+if __name__ == "__main__":
+    main()

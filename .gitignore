@@ -1,0 +1,22 @@
+# 密钥与本地产物，绝不入库
+secrets/
+*.key
+*.env
+
+# 临时产物
+tmp_real/
+req_slices/
+runs/
+*.log
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+
+# 真实报告照片的测试暂存目录（隐私红线，永不提交）
+app/test/real/
+
+# 比赛材料与本地导出，留在本机即可
+docs/
+att2*.txt
+vendor/pdf-toolkit/
