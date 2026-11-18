@@ -6,8 +6,14 @@
  * 默认的页面结构按科室真实在用的登记表来（病程首页 / 血常规 / 出凝血 / 肝功能 /
  * 肾功能 / 电解质 / 综合生化），不是按检验科的开单习惯来。
  *
- * 三项刻意没有放进默认库：身份证号、联系电话、住址。它们是直接标识符，
- * 录进浏览器只会增加泄露面，对质控本身没有用处。需要的话自己加。
+ * 身份证、电话、住址这些直接标识符**收进来了**，因为医院的登记表本来就有，
+ * 而且这些字段确实要"照着报告录"。我们的立场是：它们只留在本机浏览器里，
+ * 不上传、不经过开发者；导出时可以用「隐藏身份信息」一键抹掉。
+ *
+ * 页面分两类（page.kind）：
+ *   common  常规页面——每个病人都会做的检查，默认勾选；
+ *   special 特殊页面——某个病种才做的专项检查，默认不勾。
+ * 以后做"页面组"时，组就是这两类页面的组合。
  *
  * 数据存在浏览器 localStorage 里，换电脑就没了——这是刻意的：
  * 这是科室自己维护的一份表，不该由我们托管。
@@ -18,10 +24,10 @@
 (function (global) {
   'use strict';
 
-  // v3：指标与页面扩到 90 项 / 15 页；从 v2 升级时把新默认项并进去，不丢用户自己加的
-  var STORE_KEY = 'jiaowolu.library.v3';
-  var PREV_KEY = 'jiaowolu.library.v2';
-  var OLD_KEY = 'jiaowolu.library.v1';
+  // v4：按医院真实后台的登记表重建（病案首页 14 项、病毒学/FISH/病理/骨髓流式/增强CT/免疫学/出院小结）
+  var STORE_KEY = 'jiaowolu.library.v4';
+  var PREV_KEY = 'jiaowolu.library.v3';
+  var OLD_KEY = 'jiaowolu.library.v2';
 
   function num(id, name, group, unit, ref, low, high, aliases) {
     return { id: id, name: name, group: group, type: 'num', unit: unit, ref: ref, low: low, high: high, aliases: aliases };
@@ -34,15 +40,21 @@
   }
 
   var DEFAULT_INDICATORS = [
-    // ---- 病程首页：这一页没有数值，全是文本与日期 ----
-    txt('NAME',      '姓名',       '病程首页', ['姓名', '患者姓名', '名字', '姓 名']),
-    txt('SEX',       '性别',       '病程首页', ['性别', '性 别']),
-    txt('ADMNO',     '住院号',     '病程首页', ['住院号', '住院号/门诊号', '病案号']),
-    num('AGE',       '年龄',       '病程首页', '岁', '', null, null, ['年龄', '就诊年龄']),
-    dat('VISITDATE', '就诊日期',   '病程首页', ['就诊日期', '入院日期']),
-    txt('DIAG',      '诊断结果',   '病程首页', ['诊断', '诊断结果', '出院诊断', '入院诊断']),
-    txt('ETHNIC',    '民族',       '病程首页', ['民族']),
-    txt('HOSP',      '就诊医院',   '病程首页', ['就诊医院', '医院名称', '医疗机构']),
+    // ---- 病案首页：几乎没有数值，全是文本与日期（照医院真实登记表的 14 项） ----
+    txt('NAME',      '姓名',       '病案首页', ['姓名', '患者姓名', '名字', '姓 名']),
+    txt('SEX',       '性别',       '病案首页', ['性别', '性 别']),
+    txt('ADMNO',     '住院号',     '病案首页', ['住院号', '住院号/门诊号', '病案号']),
+    num('VISITAGE',  '就诊年龄',   '病案首页', '岁', '', null, null, ['就诊年龄', '入院年龄']),
+    dat('VISITDATE', '就诊日期',   '病案首页', ['就诊日期', '入院日期', '入院时间']),
+    txt('DIAGTYPE',  '诊断分型',   '病案首页', ['诊断分型', '诊断结果', '诊断', '出院诊断', '入院诊断']),
+    num('AGE',       '年龄',       '病案首页', '岁', '', null, null, ['年龄']),
+    txt('ETHNIC',    '民族',       '病案首页', ['民族']),
+    txt('HUKOU',     '户籍',       '病案首页', ['户籍', '户籍地址', '户口', '户口所在地']),
+    txt('IDNO',      '身份证',     '病案首页', ['身份证', '身份证号', '证件号码']),
+    txt('PHONE',     '电话',       '病案首页', ['电话', '联系电话', '手机', '手机号']),
+    txt('PHONE2',    '其他联系方式', '病案首页', ['其他联系方式', '其他电话', '联系人电话']),
+    txt('ADDR',      '地址',       '病案首页', ['地址', '家庭住址', '住址', '现住址']),
+    txt('HOSP',      '就诊医院',   '病案首页', ['就诊医院', '医院名称', '医疗机构']),
 
     // ---- 血常规 ----
     num('WBC',     '白细胞计数',   '血常规', '10^9/L',  '3.5–9.5',   3.5,  9.5,  ['白细胞', '白细胞计数', '白细胞总数', 'WBC', '白血球']),
@@ -110,63 +122,108 @@
     num('P', '磷', '电解质', 'mmol/L', '0.85–1.51', 0.85, 1.51, ['磷', '血磷', '无机磷', 'P', 'PHOS']),
     num('MG', '镁', '电解质', 'mmol/L', '0.75–1.02', 0.75, 1.02, ['镁', '血镁', '镁离子', 'MG', 'Mg']),
 
-    // 心肌酶
-    num('CK', '肌酸激酶', '心肌酶', 'U/L', '40–200', 40, 200, ['肌酸激酶', 'CK', 'CPK']),
-    num('CKMB', '肌酸激酶同工酶', '心肌酶', 'U/L', '0–25', 0, 25, ['肌酸激酶同工酶', 'CK-MB', 'CKMB', 'MB']),
-    num('HBDH', 'α-羟丁酸脱氢酶', '心肌酶', 'U/L', '72–182', 72, 182, ['α-羟丁酸脱氢酶', '羟丁酸脱氢酶', 'HBDH', 'α-HBDH']),
-    num('CTNI', '肌钙蛋白I', '心肌酶', 'ng/mL', '0–0.04', 0, 0.04, ['肌钙蛋白I', '肌钙蛋白', 'cTnI', 'TNI']),
+    // 病毒学报告（定性为主，照抄原文，不判读临床意义）
+    txt('HBSAG',      '乙肝病毒表面抗原',   '病毒学报告', ['乙肝病毒表面抗原', '乙肝表面抗原', 'HBsAg', '表面抗原']),
+    txt('HBSAB',      '乙肝病毒表面抗体',   '病毒学报告', ['乙肝病毒表面抗体', '乙肝表面抗体', 'HBsAb', '表面抗体']),
+    txt('HBEAG',      '乙肝病毒e抗原',      '病毒学报告', ['乙肝病毒e抗原', '乙肝e抗原', 'HBeAg', 'e抗原']),
+    txt('HBEAB',      '乙肝病毒e抗体',      '病毒学报告', ['乙肝病毒e抗体', '乙肝e抗体', 'HBeAb', 'e抗体']),
+    txt('HBCAB',      '乙肝病毒核心抗体',   '病毒学报告', ['乙肝病毒核心抗体', '乙肝核心抗体', 'HBcAb', '核心抗体']),
+    txt('HBCAB_IGM',  '乙肝病毒核心抗体IgM','病毒学报告', ['乙肝病毒核心抗体IgM', '核心抗体IgM', 'HBcAb-IgM', 'IgM核心抗体']),
+    txt('HCVAB',      '丙肝病毒抗体 HCV_Ab','病毒学报告', ['丙肝病毒抗体', '丙型肝炎抗体', '抗-HCV', 'HCV_Ab', 'HCVAb']),
+    num('HBV_DNA',    '乙肝病毒核酸定量_PCR', '病毒学报告', 'IU/mL', '', null, null, ['乙肝病毒核酸定量', 'HBV-DNA', 'HBV_DNA', '乙肝DNA']),
+    num('EBV_DNA',    'EBV病毒DNA定量',      '病毒学报告', 'copies/mL', '', null, null, ['EBV病毒DNA定量', 'EBV-DNA', 'EBV_DNA', 'EB病毒DNA']),
 
-    // 血脂
-    num('TC', '总胆固醇', '血脂', 'mmol/L', '2.8–5.18', 2.8, 5.18, ['总胆固醇', '胆固醇', 'TC', 'CHOL']),
-    num('TG', '甘油三酯', '血脂', 'mmol/L', '0.56–1.70', 0.56, 1.70, ['甘油三酯', '三酰甘油', 'TG']),
-    num('HDLC', '高密度脂蛋白胆固醇', '血脂', 'mmol/L', '1.04–1.55', 1.04, 1.55, ['高密度脂蛋白胆固醇', '高密度脂蛋白', 'HDL-C', 'HDLC']),
-    num('LDLC', '低密度脂蛋白胆固醇', '血脂', 'mmol/L', '1.5–3.37', 1.5, 3.37, ['低密度脂蛋白胆固醇', '低密度脂蛋白', 'LDL-C', 'LDLC']),
+    // 免疫学报告（截图里的 11 个框；β2-微球蛋白与肾功能是同一个指标，复用 B2MG）
+    num('IGG', '免疫球蛋白IgG', '免疫学报告', 'g/L', '7.0–16.0', 7, 16, ['免疫球蛋白IgG', 'IgG', 'IGG', '免疫球蛋白G']),
+    num('IGA', '免疫球蛋白IgA', '免疫学报告', 'g/L', '0.7–4.0', 0.7, 4.0, ['免疫球蛋白IgA', 'IgA', 'IGA', '免疫球蛋白A']),
+    num('IGM', '免疫球蛋白IgM', '免疫学报告', 'g/L', '0.4–2.3', 0.4, 2.3, ['免疫球蛋白IgM', 'IgM', 'IGM', '免疫球蛋白M']),
+    num('SF',  '铁蛋白',       '免疫学报告', 'ng/mL', '30–400', 30, 400, ['铁蛋白', '血清铁蛋白', 'SF', 'FERR', '铁蛋白_ng/mL']),
+    num('ESR', '红细胞沉降率', '免疫学报告', 'mm/h', '0–15', 0, 15, ['红细胞沉降率', '血沉', 'ESR', '红细胞沉降率_mm_h']),
+    txt('IFFE', '血免疫固定电泳', '免疫学报告', ['血免疫固定电泳', '免疫固定电泳', 'IFE', 'IFFE']),
+    txt('CIMU', '结论描述',       '免疫学报告', ['结论描述', '结论', '免疫学结论']),
 
-    // 甲功
-    num('TSH', '促甲状腺激素', '甲功', 'mIU/L', '0.27–4.2', 0.27, 4.2, ['促甲状腺激素', 'TSH']),
-    num('FT3', '游离三碘甲状腺原氨酸', '甲功', 'pmol/L', '3.1–6.8', 3.1, 6.8, ['游离三碘甲状腺原氨酸', '游离T3', 'FT3']),
-    num('FT4', '游离甲状腺素', '甲功', 'pmol/L', '12–22', 12, 22, ['游离甲状腺素', '游离T4', 'FT4']),
-    num('TT3', '总三碘甲状腺原氨酸', '甲功', 'nmol/L', '1.3–3.1', 1.3, 3.1, ['总三碘甲状腺原氨酸', '总T3', 'TT3']),
-    num('TT4', '总甲状腺素', '甲功', 'nmol/L', '66–181', 66, 181, ['总甲状腺素', '总T4', 'TT4']),
+    // FISH 报告：都是"重排/扩增/缺失"的定性结果
+    txt('FISH_BCL2',  'BCL2（FISH）',  'FISH报告', ['BCL2', 'BCL-2', 'FISH-BCL2', 'BCL2基因重排']),
+    txt('FISH_BCL6',  'BCL6（FISH）',  'FISH报告', ['BCL6', 'BCL-6', 'FISH-BCL6']),
+    txt('FISH_CMYC',  'C_MYC（FISH）', 'FISH报告', ['C_MYC', 'C-MYC', 'CMYC', 'MYC']),
+    txt('FISH_TP53',  'TP53（FISH）',  'FISH报告', ['TP53', 'P53基因', 'FISH-TP53']),
+    txt('FISH_IRF4',  'IRF4',          'FISH报告', ['IRF4']),
+    txt('FISH_MALT1', 'MALT1',         'FISH报告', ['MALT1']),
+    txt('FISH_CCND1', 'CCND1',         'FISH报告', ['CCND1', 'CyclinD1基因']),
+    txt('FISH_9P24',  '9p24_PD_L1',    'FISH报告', ['9p24_PD_L1', '9p24', 'PD-L1扩增']),
+    txt('FISH_6Q21',  '6q21',          'FISH报告', ['6q21']),
+    txt('FISH_ALK',   'ALK（FISH）',   'FISH报告', ['ALK', 'FISH-ALK', 'ALK重排']),
+    txt('FISH_DUSP22','DUSP22',        'FISH报告', ['DUSP22']),
+    txt('FISH_TP63',  'TP63',          'FISH报告', ['TP63']),
+    txt('FISH_11Q23', '11q23_3扩增',   'FISH报告', ['11q23_3扩增', '11q23', '11q23扩增']),
+    txt('FISH_11Q24', '11q24_3缺失',   'FISH报告', ['11q24_3缺失', '11q24', '11q24缺失']),
+    txt('FISH_IGHV',  'IGHV高频突变',  'FISH报告', ['IGHV高频突变', 'IGHV', 'IGHV突变']),
+    txt('FISH_NOTE',  '备注（FISH）',  'FISH报告', ['备注']),
 
-    // 肿瘤标志物
-    num('CEA', '癌胚抗原', '肿瘤标志物', 'ng/mL', '0–5', 0, 5, ['癌胚抗原', 'CEA']),
-    num('AFP', '甲胎蛋白', '肿瘤标志物', 'ng/mL', '0–7', 0, 7, ['甲胎蛋白', 'AFP']),
-    num('CA125', '糖类抗原125', '肿瘤标志物', 'U/mL', '0–35', 0, 35, ['糖类抗原125', 'CA125', 'CA-125']),
-    num('CA199', '糖类抗原19-9', '肿瘤标志物', 'U/mL', '0–27', 0, 27, ['糖类抗原199', '糖类抗原19-9', 'CA199', 'CA19-9']),
-    num('CA153', '糖类抗原15-3', '肿瘤标志物', 'U/mL', '0–25', 0, 25, ['糖类抗原153', '糖类抗原15-3', 'CA153', 'CA15-3']),
-    num('SF', '铁蛋白', '肿瘤标志物', 'ng/mL', '30–400', 30, 400, ['铁蛋白', '血清铁蛋白', 'SF', 'FERR']),
+    /* 病理报告：40 项免疫组化 + 三个描述项。
+       免疫组化取 +/−/±，是"蛋白有没有表达"；FISH 是"基因有没有重排"，两回事。
+       所以同名的几项（BCL-2/BCL-6/C-MYC/ALK/TP53）名字后面带（病理）/（FISH）区分。 */
+    dat('PDATE', '诊断时间',   '病理报告', ['诊断时间', '报告日期', '病理日期']),
+    txt('PCONC', '诊断结论',   '病理报告', ['诊断结论', '病理诊断', '诊断意见']),
+    txt('PIMMU', '免疫结果',   '病理报告', ['免疫结果', '免疫组化结果', '免疫表型']),
+    txt('IHC_CD20',   'CD20',   '病理报告', ['CD20']),
+    txt('IHC_CD22',   'CD22',   '病理报告', ['CD22']),
+    txt('IHC_CD19',   'CD19',   '病理报告', ['CD19']),
+    txt('IHC_CD79A',  'CD79a',  '病理报告', ['CD79a', 'CD79α']),
+    txt('IHC_CD79B',  'CD79b',  '病理报告', ['CD79b', 'CD79β']),
+    txt('IHC_CD3',    'CD3',    '病理报告', ['CD3']),
+    txt('IHC_CD5',    'CD5',    '病理报告', ['CD5']),
+    txt('IHC_CD21',   'CD21',   '病理报告', ['CD21']),
+    txt('IHC_CD23',   'CD23',   '病理报告', ['CD23']),
+    txt('IHC_CD10',   'CD10',   '病理报告', ['CD10']),
+    txt('IHC_CMYC',   'C-MYC（病理）', '病理报告', ['C-MYC', 'C-MYC蛋白', 'CMYC']),
+    txt('IHC_CYCLIN', 'CyclinD1', '病理报告', ['CyclinD1', 'Cyclin D1', '细胞周期蛋白D1']),
+    txt('IHC_BCL2',   'BCL-2（病理）', '病理报告', ['BCL-2', 'BCL2', 'BCL-2蛋白']),
+    txt('IHC_BCL6',   'BCL-6（病理）', '病理报告', ['BCL-6', 'BCL6', 'BCL-6蛋白']),
+    txt('IHC_MUM1',   'MUM-1',  '病理报告', ['MUM-1', 'MUM1']),
+    txt('IHC_CD30',   'CD30',   '病理报告', ['CD30']),
+    txt('IHC_CD37',   'CD37',   '病理报告', ['CD37']),
+    txt('IHC_CD38',   'CD38',   '病理报告', ['CD38']),
+    txt('IHC_CD47',   'CD47',   '病理报告', ['CD47']),
+    txt('IHC_P53',    'P53',    '病理报告', ['P53', 'p53']),
+    txt('IHC_PD1',    'PD-1',   '病理报告', ['PD-1', 'PD1']),
+    num('IHC_KI67',   'Ki67',   '病理报告', '%', '', null, null, ['Ki67', 'KI67', 'Ki-67', '增殖指数']),
+    txt('IHC_CD68',   'CD68',   '病理报告', ['CD68']),
+    txt('IHC_GATA3',  'GATA3',  '病理报告', ['GATA3']),
+    txt('IHC_CD8',    'CD8',    '病理报告', ['CD8']),
+    txt('IHC_CD2',    'CD2',    '病理报告', ['CD2']),
+    txt('IHC_CD7',    'CD7',    '病理报告', ['CD7']),
+    txt('IHC_CD4',    'CD4',    '病理报告', ['CD4']),
+    txt('IHC_CD56',   'CD56',   '病理报告', ['CD56']),
+    txt('IHC_PDL1',   'PD-L1',  '病理报告', ['PD-L1', 'PDL1']),
+    txt('IHC_EBER',   'EBER',   '病理报告', ['EBER', 'EBER原位杂交']),
+    txt('IHC_ICOS',   'ICOS',   '病理报告', ['ICOS']),
+    txt('IHC_CXCL13', 'CXCL-13','病理报告', ['CXCL-13', 'CXCL13']),
+    txt('IHC_TIA1',   'TIA-1',  '病理报告', ['TIA-1', 'TIA1']),
+    txt('IHC_PERF',   'Perforin',  '病理报告', ['Perforin', '穿孔素']),
+    txt('IHC_GZMB',   'GranzymeB', '病理报告', ['GranzymeB', 'Granzyme B', '粒酶B']),
+    txt('IHC_ALK',    'ALK（病理）', '病理报告', ['ALK', 'ALK蛋白', '间变性淋巴瘤激酶']),
+    txt('IHC_TBX21',  'TBX21',  '病理报告', ['TBX21']),
+    txt('IHC_EGFR',   'EGFR',   '病理报告', ['EGFR']),
+    txt('IHC_SOX11',  'SOX11',  '病理报告', ['SOX11']),
 
-    // 免疫球蛋白与补体
-    num('IGG', '免疫球蛋白G', '免疫球蛋白', 'g/L', '7.0–16.0', 7, 16, ['免疫球蛋白G', 'IgG', 'IGG']),
-    num('IGA', '免疫球蛋白A', '免疫球蛋白', 'g/L', '0.7–4.0', 0.7, 4.0, ['免疫球蛋白A', 'IgA', 'IGA']),
-    num('IGM', '免疫球蛋白M', '免疫球蛋白', 'g/L', '0.4–2.3', 0.4, 2.3, ['免疫球蛋白M', 'IgM', 'IGM']),
-    num('IGE', '免疫球蛋白E', '免疫球蛋白', 'IU/mL', '0–100', 0, 100, ['免疫球蛋白E', 'IgE', 'IGE']),
-    num('C3', '补体C3', '免疫球蛋白', 'g/L', '0.9–1.8', 0.9, 1.8, ['补体C3', 'C3']),
-    num('C4', '补体C4', '免疫球蛋白', 'g/L', '0.1–0.4', 0.1, 0.4, ['补体C4', 'C4']),
+    // 骨髓流式报告
+    txt('FLOW_INV', '骨髓是否受累',        '骨髓流式报告', ['骨髓是否受累', '骨髓受累', '骨髓侵犯']),
+    num('FLOW_PCT', '异常细胞占白细胞比例', '骨髓流式报告', '%', '', null, null, ['异常细胞占白细胞比例', '异常细胞比例', '流式异常细胞比例']),
 
-    // 淋巴细胞亚群（绝对值）
-    num('CD3', 'T淋巴细胞', '淋巴细胞亚群', '10^9/L', '0.96–2.86', 0.96, 2.86, ['T淋巴细胞', 'CD3+', 'CD3']),
-    num('CD4', '辅助T淋巴细胞', '淋巴细胞亚群', '10^9/L', '0.45–1.44', 0.45, 1.44, ['辅助T淋巴细胞', 'CD4+', 'CD4']),
-    num('CD8', '抑制T淋巴细胞', '淋巴细胞亚群', '10^9/L', '0.32–1.25', 0.32, 1.25, ['抑制T淋巴细胞', 'CD8+', 'CD8']),
-    num('CD4CD8', 'CD4/CD8比值', '淋巴细胞亚群', '', '0.70–2.00', 0.7, 2.0, ['CD4/CD8', 'CD4CD8', 'CD4与CD8比值']),
-    num('CD19', 'B淋巴细胞', '淋巴细胞亚群', '10^9/L', '0.09–0.56', 0.09, 0.56, ['B淋巴细胞', 'CD19+', 'CD19']),
-    num('NK', '自然杀伤细胞', '淋巴细胞亚群', '10^9/L', '0.15–1.10', 0.15, 1.10, ['自然杀伤细胞', 'NK细胞', 'NK']),
+    // 增强CT报告（整段照抄，不做结构化）
+    txt('CT_RPT',  'PET_CT报告内容', '增强CT报告', ['PET_CT报告内容', 'CT报告内容', '影像学报告', '报告内容']),
+    txt('CT_TYPE', '影像学报告类型', '增强CT报告', ['影像学报告类型', '检查类型', '报告类型']),
 
-    // 感染筛查（定性，只看阳性/阴性，不判断临床意义）
-    txt('HBSAG', '乙肝表面抗原', '感染筛查', ['乙肝表面抗原', 'HBsAg', '表面抗原']),
-    txt('HBSAB', '乙肝表面抗体', '感染筛查', ['乙肝表面抗体', 'HBsAb', '表面抗体']),
-    txt('HBEAG', '乙肝e抗原', '感染筛查', ['乙肝e抗原', 'HBeAg']),
-    txt('HBEAB', '乙肝e抗体', '感染筛查', ['乙肝e抗体', 'HBeAb']),
-    txt('HBCAB', '乙肝核心抗体', '感染筛查', ['乙肝核心抗体', 'HBcAb', '核心抗体']),
-    txt('HCVAB', '丙肝抗体', '感染筛查', ['丙肝抗体', '丙型肝炎抗体', '抗-HCV', 'HCVAb']),
-    txt('TRUST', '梅毒螺旋体抗体', '感染筛查', ['梅毒螺旋体抗体', '梅毒抗体', 'TRUST', 'TPPA']),
-    txt('HIVAB', 'HIV抗体', '感染筛查', ['HIV抗体', '艾滋病抗体', '抗-HIV', 'HIVAb']),
-
-    // 铁代谢
-    num('FE', '血清铁', '铁代谢', 'μmol/L', '9–30', 9, 30, ['血清铁', '铁', 'FE', 'SI']),
-    num('TIBC', '总铁结合力', '铁代谢', 'μmol/L', '45–75', 45, 75, ['总铁结合力', 'TIBC']),
-    num('TSAT', '转铁蛋白饱和度', '铁代谢', '%', '20–50', 20, 50, ['转铁蛋白饱和度', 'TSAT', '铁饱和度'])
+    // 出院小结（首次与最新同一套字段）
+    dat('DDATE',      '诊断时间',         '出院小结', ['诊断时间', '出院诊断时间']),
+    txt('GRADEUP',    '是否向高级别转化', '出院小结', ['是否向高级别转化', '向高级别转化', '转化']),
+    txt('DIED',       '是否死亡',         '出院小结', ['是否死亡', '死亡']),
+    dat('DEATHDATE',  '死亡时间',         '出院小结', ['死亡时间', '死亡日期']),
+    txt('DEATHCAUSE', '死亡原因',         '出院小结', ['死亡原因', '死因']),
+    dat('LASTFUP',    '末次随访时间',     '出院小结', ['末次随访时间', '末次随访', '随访日期']),
+    dat('LOSTFUP',    '失访时间',         '出院小结', ['失访时间', '失访日期']),
+    txt('FUPNOTE',    '随访情况说明',     '出院小结', ['随访情况说明', '随访情况', '随访记录'])
   ];
 
   var LIVER = ['ALT', 'AST', 'ALP', 'GGT', 'LDH', 'TBIL', 'DBIL', 'IBIL', 'ALB', 'TP', 'GLB'];
@@ -176,24 +233,25 @@
   /* on:false 的页面默认不勾选——库可以大，但默认打开的表不该有上百行。
      需要哪一页，在左侧勾上就行。 */
   var DEFAULT_PAGES = [
-    { id: 'course', name: '病程首页', ids: ['NAME', 'SEX', 'ADMNO', 'AGE', 'VISITDATE', 'DIAG', 'ETHNIC', 'HOSP'] },
-    { id: 'cbc',    name: '血常规',   ids: ['WBC', 'RBC', 'HGB', 'PLT', 'LYMPH_C', 'NEUT_C', 'MONO_C', 'HCT', 'MCV', 'MCH'] },
-    { id: 'coag',   name: '出凝血',   ids: ['APTT', 'PT', 'TT', 'FIB', 'FDP', 'DDIMER', 'INR'] },
-    { id: 'liver',  name: '肝功能',   ids: LIVER },
-    { id: 'renal',  name: '肾功能',   ids: RENAL },
-    { id: 'elec',   name: '电解质',   ids: ELEC },
+    /* 常规页面：每个病人都会做的检查，默认勾选 */
+    { id: 'course', kind: 'common', name: '病案首页', ids: ['NAME', 'SEX', 'ADMNO', 'VISITAGE', 'VISITDATE', 'DIAGTYPE', 'AGE', 'ETHNIC', 'HUKOU', 'IDNO', 'PHONE', 'PHONE2', 'ADDR', 'HOSP'] },
+    { id: 'cbc',    kind: 'common', name: '血常规',   ids: ['WBC', 'RBC', 'HGB', 'PLT', 'LYMPH_C', 'NEUT_C', 'MONO_C', 'HCT', 'MCV', 'MCH'] },
+    { id: 'liver',  kind: 'common', name: '肝功能',   ids: LIVER },
+    { id: 'renal',  kind: 'common', name: '肾功能',   ids: RENAL },
+    { id: 'elec',   kind: 'common', name: '电解质',   ids: ELEC },
     // 综合生化 = 肝功 + 肾功 + 电解质（+ 血糖）合并成一页的报告，
-    // 和上面三页是"填一个或填三个"的关系。指标是同一批，不会重复计费也不会重复计数。
-    { id: 'bio',    name: '综合生化', ids: LIVER.concat(RENAL, ELEC, ['GLU']) },
+    // 和上面三页是"填一个或填三个"的关系。指标是同一批，不会重复计数。
+    { id: 'bio',    kind: 'common', name: '综合生化', ids: LIVER.concat(RENAL, ELEC, ['GLU']) },
+    { id: 'discharge', kind: 'common', name: '出院小结', ids: ['DDATE', 'GRADEUP', 'DIED', 'DEATHDATE', 'DEATHCAUSE', 'LASTFUP', 'LOSTFUP', 'FUPNOTE'] },
 
-    { id: 'cardiac', name: '心肌酶',       on: false, ids: ['CK', 'CKMB', 'HBDH', 'LDH', 'CTNI'] },
-    { id: 'lipid',   name: '血脂',         on: false, ids: ['TC', 'TG', 'HDLC', 'LDLC'] },
-    { id: 'thyroid', name: '甲功',         on: false, ids: ['TSH', 'FT3', 'FT4', 'TT3', 'TT4'] },
-    { id: 'tumor',   name: '肿瘤标志物',   on: false, ids: ['CEA', 'AFP', 'CA125', 'CA199', 'CA153', 'SF'] },
-    { id: 'immune',  name: '免疫球蛋白',   on: false, ids: ['IGG', 'IGA', 'IGM', 'IGE', 'C3', 'C4'] },
-    { id: 'lymph',   name: '淋巴细胞亚群', on: false, ids: ['CD3', 'CD4', 'CD8', 'CD4CD8', 'CD19', 'NK'] },
-    { id: 'infect',  name: '感染筛查',     on: false, ids: ['HBSAG', 'HBSAB', 'HBEAG', 'HBEAB', 'HBCAB', 'HCVAB', 'TRUST', 'HIVAB'] },
-    { id: 'iron',    name: '铁代谢',       on: false, ids: ['FE', 'TIBC', 'TSAT'] }
+    /* 特殊页面：某个病种才做的专项检查，默认不勾——库可以大，默认打开的表不该几百行 */
+    { id: 'coag',   kind: 'special', on: false, name: '出凝血',       ids: ['APTT', 'PT', 'TT', 'FIB', 'FDP', 'DDIMER', 'INR'] },
+    { id: 'immu',   kind: 'special', on: false, name: '免疫学报告',   ids: ['IGG', 'IGA', 'IGM', 'B2MG', 'SF', 'ESR', 'IFFE', 'CIMU'] },
+    { id: 'infect', kind: 'special', on: false, name: '病毒学报告',   ids: ['HBSAG', 'HBSAB', 'HBEAG', 'HBEAB', 'HBCAB', 'HBCAB_IGM', 'HCVAB', 'HBV_DNA', 'EBV_DNA'] },
+    { id: 'fish',   kind: 'special', on: false, name: 'FISH报告',     ids: ['FISH_BCL2', 'FISH_BCL6', 'FISH_CMYC', 'FISH_TP53', 'FISH_IRF4', 'FISH_MALT1', 'FISH_CCND1', 'FISH_9P24', 'FISH_6Q21', 'FISH_ALK', 'FISH_DUSP22', 'FISH_TP63', 'FISH_11Q23', 'FISH_11Q24', 'FISH_IGHV', 'FISH_NOTE'] },
+    { id: 'patho',  kind: 'special', on: false, name: '病理报告',     ids: ['PDATE', 'PCONC', 'PIMMU', 'IHC_CD20', 'IHC_CD22', 'IHC_CD19', 'IHC_CD79A', 'IHC_CD79B', 'IHC_CD3', 'IHC_CD5', 'IHC_CD21', 'IHC_CD23', 'IHC_CD10', 'IHC_CMYC', 'IHC_CYCLIN', 'IHC_BCL2', 'IHC_BCL6', 'IHC_MUM1', 'IHC_CD30', 'IHC_CD37', 'IHC_CD38', 'IHC_CD47', 'IHC_P53', 'IHC_PD1', 'IHC_KI67', 'IHC_CD68', 'IHC_GATA3', 'IHC_CD8', 'IHC_CD2', 'IHC_CD7', 'IHC_CD4', 'IHC_CD56', 'IHC_PDL1', 'IHC_EBER', 'IHC_ICOS', 'IHC_CXCL13', 'IHC_TIA1', 'IHC_PERF', 'IHC_GZMB', 'IHC_ALK', 'IHC_TBX21', 'IHC_EGFR', 'IHC_SOX11'] },
+    { id: 'flow',   kind: 'special', on: false, name: '骨髓流式报告', ids: ['FLOW_INV', 'FLOW_PCT'] },
+    { id: 'ct',     kind: 'special', on: false, name: '增强CT报告',   ids: ['CT_RPT', 'CT_TYPE'] }
   ];
 
   var state = { indicators: [], pages: [] };
@@ -241,12 +299,16 @@
             var haveP = {};
             old.pages.forEach(function (p) { haveP[p.id] = 1; });
             DEFAULT_PAGES.forEach(function (d) { if (!haveP[d.id]) old.pages.push(clone(d)); });
-            // 老页面若只是默认页的子集（说明当时没改过），扩到默认的那一版
+            // 这一版的默认页面是照医院真实后台的登记表重建的，字段变化很大：
+            // 默认页的定义以新版为准，只保留用户自己的"勾没勾"。
             old.pages.forEach(function (p) {
               var def = DEFAULT_PAGES.filter(function (d) { return d.id === p.id; })[0];
-              if (!def || p.ids.length >= def.ids.length) return;
-              var subset = p.ids.every(function (id) { return def.ids.indexOf(id) >= 0; });
-              if (subset) p.ids = def.ids.slice();
+              if (!def) return;                    // 用户自建的页面原样保留
+              var same = p.ids.length === def.ids.length &&
+                p.ids.every(function (id, i) { return id === def.ids[i]; });
+              if (!same) p.ids = def.ids.slice();
+              p.name = def.name;
+              p.kind = def.kind;
             });
             state = { indicators: old.indicators, pages: old.pages };
             rebuild(); save();
@@ -455,6 +517,7 @@
     if (!ids.length) throw new Error('至少选一个指标');
     var id = String(raw.id || '').trim() || 'p' + Date.now().toString(36);
     var page = { id: id, name: name, ids: ids };
+    page.kind = raw.kind === 'special' ? 'special' : 'common';
     if (raw.on === false) page.on = false;   // 默认不勾选的页（库大、默认表要小）
     return page;
   }

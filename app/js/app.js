@@ -118,6 +118,22 @@
 
   function isRequired(indId) { return requiredIds().indexOf(indId) !== -1; }
 
+  function pageRowHtml(p, sel) {
+    var on = sel.ids.indexOf(p.id) !== -1;
+    var req = sel.req.indexOf(p.id) !== -1;
+    return '<div class="page-check' + (on ? ' on' : '') + '">' +
+      '<label class="pc-main">' +
+        '<input type="checkbox" class="pc-use" value="' + esc(p.id) + '"' + (on ? ' checked' : '') + '>' +
+        '<span class="pc-name">' + esc(p.name) + '</span>' +
+        '<span class="pc-count">' + p.ids.length + '</span>' +
+      '</label>' +
+      '<label class="pc-req' + (on ? '' : ' off') + '" title="勾上以后，这一页没录到才会标红">' +
+        '<input type="checkbox" class="pc-must" value="' + esc(p.id) + '"' +
+          (req && on ? ' checked' : '') + (on ? '' : ' disabled') + '>必填' +
+      '</label>' +
+      '</div>';
+  }
+
   function renderPageChecks() {
     var box = $('#page-checks');
     if (!box) return;
@@ -127,21 +143,20 @@
       box.innerHTML = '<p class="tiny muted">还没有页面。点右上角「指标与页面」新建一个。</p>';
       return;
     }
-    box.innerHTML = pages.map(function (p) {
-      var on = sel.ids.indexOf(p.id) !== -1;
-      var req = sel.req.indexOf(p.id) !== -1;
-      return '<div class="page-check' + (on ? ' on' : '') + '">' +
-        '<label class="pc-main">' +
-          '<input type="checkbox" class="pc-use" value="' + esc(p.id) + '"' + (on ? ' checked' : '') + '>' +
-          '<span class="pc-name">' + esc(p.name) + '</span>' +
-          '<span class="pc-count">' + p.ids.length + '</span>' +
-        '</label>' +
-        '<label class="pc-req' + (on ? '' : ' off') + '" title="勾上以后，这一页没录到才会标红">' +
-          '<input type="checkbox" class="pc-must" value="' + esc(p.id) + '"' +
-            (req && on ? ' checked' : '') + (on ? '' : ' disabled') + '>必填' +
-        '</label>' +
-        '</div>';
-    }).join('');
+    // 常规 / 特殊 分开列：常规是每个病人都做的，特殊是这个病种才做的专项检查。
+    // 以后做"页面组"时，组就是这两堆页面的组合。
+    var common = pages.filter(function (p) { return p.kind !== 'special'; });
+    var special = pages.filter(function (p) { return p.kind === 'special'; });
+    var html = '';
+    if (common.length) {
+      html += '<div class="pc-group">常规页面<span class="pc-group-note">每个病人都会做</span></div>';
+      html += common.map(function (p) { return pageRowHtml(p, sel); }).join('');
+    }
+    if (special.length) {
+      html += '<div class="pc-group">特殊页面<span class="pc-group-note">病种专项，按需勾选</span></div>';
+      html += special.map(function (p) { return pageRowHtml(p, sel); }).join('');
+    }
+    box.innerHTML = html;
   }
 
   function assetsOf(pid) {
@@ -532,7 +547,7 @@
       '任务：读出这一页上真实存在的信息，只输出 JSON。',
       '',
       '输出格式：',
-      '{"report_type":"血常规|生化|免疫|出凝血|病程首页|其他","report_date":"YYYY-MM-DD 或 空字符串",',
+      '{"report_type":"血常规|生化|免疫|出凝血|病毒学|FISH|病理|骨髓流式|影像|病案首页|出院小结|其他","report_date":"YYYY-MM-DD 或 空字符串",',
       ' "items":[{"raw_name":"报告上的原文项目名","indicator":"标准代号或 null",',
       '           "value":"原文","unit":"单位原文","ref":"参考范围原文","confidence":0.0}]}',
       '',
@@ -543,9 +558,13 @@
       '3. 数值保留原文写法，不要换算单位，不要四舍五入。',
       '4. indicator 只能从下面的候选里选。这一页没有的项目，不要出现在 items 里。',
       '5. 如果这一页根本不是报告（比如身份证、发票、空白页），items 返回空数组。',
-      '6. 文本项（姓名、性别、诊断等）逐字照抄，不要改写、不要补全、不要翻译。',
+      '6. 文本项（姓名、性别、诊断、结论、报告正文等）必须逐字照抄：照抄错别字、简写、符号、' +
+      '   换行处的断字，一个字都不许改。不要纠正、不要润色、不要补全、不要翻译、不要合并句子。',
+      '   病历原文改一个字都算错——这类字段的用途是把原文搬过去，不是把它写得更好。',
       '7. 页眉或表头里印着姓名、性别、年龄、住院号，只要清晰可辨，也照抄下来（记在对应代号下），' +
       '不要因为它们"不像检验项目"就跳过。',
+      '8. 定性结果（免疫组化的 +、−、±，FISH 的阳性/阴性，下拉框里的"未做""不详"）照原样输出，' +
+      '   只写图上印着的那个，不要自己判断该是哪一种。',
       '',
       '候选指标：',
       lines
@@ -1065,6 +1084,14 @@
 
   /* 导出成结构化 JSON：给下游用（入库、二次核对、写论文附录）。
    * 和 CSV 的区别是 CSV 只导当前患者，JSON 导全部患者并保留来源与置信度。 */
+  /* 身份证、电话、地址这些直接标识符：录进来是为了"照着报告录"，
+   * 但导出去是要给别人的，所以默认抹掉。想导原值，把左侧那个勾去掉。 */
+  var IDENT_IDS = { IDNO: 1, PHONE: 1, PHONE2: 1, ADDR: 1 };
+  var HIDE_KEY = 'jiaowolu.hideIdent';
+  function hideIdent() {
+    try { return localStorage.getItem(HIDE_KEY) !== '0'; } catch (e) { return true; }
+  }
+
   function collectRows(pid) {
     return targetIds().map(function (id) {
       var ind = window.IndicatorLib.byId(id);
@@ -1073,10 +1100,14 @@
       var a = c.obs && c.obs.assetId
         ? S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0]
         : null;
+      var val = c.obs ? c.obs.value : '';
+      var masked = false;
+      if (val && IDENT_IDS[ind.id] && hideIdent()) { val = '（已隐藏）'; masked = true; }
       return {
         code: ind.id, name: ind.name, type: ind.type || 'num',
-        value: c.obs ? c.obs.value : '', unit: ind.unit || '', ref: ind.ref || '',
+        value: val, unit: ind.unit || '', ref: ind.ref || '',
         state: c.state, stateName: STATE_NAME[c.state] || '',
+        masked: masked,
         source: a ? (a.kind === 'pdf' ? '报告' + a.fileIndex + '-第' + a.pageNo + '页' : '报告' + a.fileIndex) : '',
         sourceType: a && a.reportType ? a.reportType : '',
         confidence: c.obs && c.obs.confidence != null ? c.obs.confidence : null
@@ -1183,7 +1214,9 @@
         var a = S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0];
         if (a) src = a.kind === 'pdf' ? '报告' + a.fileIndex + '-第' + a.pageNo + '页' : '报告' + a.fileIndex;
       }
-      return [p.code, ind.id, ind.name, c.obs ? c.obs.value : '', ind.unit, ind.ref, stateName[c.state], src];
+      var val = c.obs ? c.obs.value : '';
+      if (val && IDENT_IDS[id] && hideIdent()) val = '（已隐藏）';
+      return [p.code, ind.id, ind.name, val, ind.unit, ind.ref, stateName[c.state], src];
     });
 
     var csv = [head].concat(rows).map(function (r) {
@@ -1310,6 +1343,13 @@
     $('#btn-run').addEventListener('click', runRecognize);
     $('#btn-export').addEventListener('click', exportCsv);
     $('#btn-export-json').addEventListener('click', exportJson);
+    var chkHide = $('#chk-hide-ident');
+    if (chkHide) {
+      chkHide.checked = hideIdent();
+      chkHide.addEventListener('change', function () {
+        try { localStorage.setItem(HIDE_KEY, chkHide.checked ? '1' : '0'); } catch (e) { /* ignore */ }
+      });
+    }
     $('#btn-settings').addEventListener('click', openSettings);
 
     var btnReconnect = $('#btn-reconnect');
