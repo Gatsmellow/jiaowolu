@@ -249,7 +249,8 @@
       var label = a.kind === 'pdf' ? '报告 ' + a.fileIndex + ' · 第 ' + a.pageNo + ' 页' : '报告 ' + a.fileIndex;
       var st = a.status === 'done' ? '<span class="asset-state ok">已识别</span>'
         : a.status === 'running' ? '<span class="asset-state run">识别中</span>'
-          : a.status === 'error' ? '<span class="asset-state err">失败</span>'
+          : a.status === 'skipped' ? '<span class="asset-state" title="长边不到 900 像素，没送去识别">已跳过</span>'
+            : a.status === 'error' ? '<span class="asset-state err">失败</span>'
             : '<span class="asset-state">待识别</span>';
       if (a.lowRes) st = '<span class="asset-state err" title="长边 ' + Math.max(a.width, a.height) + ' 像素，太小，读不出小字">图太小</span>';
       return '<div class="asset' + (a.lowRes ? ' lowres' : '') + '" data-aid="' + a.id + '" title="' + esc(a.name) + '">' +
@@ -631,7 +632,22 @@
     }
 
     var todo = assetsOf(p.id).filter(function (a) { return a.status !== 'done'; });
-    if (!todo.length) { toast('这位患者的报告都识别过了。要重来请先清空本次任务。'); return; }
+
+    // 长边不到 900 像素的图不送去识别。实测这种图不会"读得差一点"，
+    // 而是要么卡很久最后返回空，要么读成相邻的、看着很像的数字——
+    // 后者会被显示成绿色，比读不出来危险得多。
+    var tooSmall = todo.filter(function (a) { return a.lowRes; });
+    if (tooSmall.length) {
+      todo = todo.filter(function (a) { return !a.lowRes; });
+      toast('有 ' + tooSmall.length + ' 张图太模糊（长边不到 900 像素），已跳过。换成手机原图再试。', 'err');
+      tooSmall.forEach(function (a) { a.status = 'skipped'; });
+      renderAll();
+    }
+
+    if (!todo.length) {
+      if (!tooSmall.length) toast('这位患者的报告都识别过了。要重来请先清空本次任务。');
+      return;
+    }
 
     S.running = true;
     setRunning(true);
