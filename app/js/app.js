@@ -283,25 +283,33 @@
 
     // 冲突只在同一次就诊内判：同一天两份报告给了两个值，那才是真对不上。
     // 不同日期之间的差异走时间轴，不标红。
+    //
+    // 另一条优先级：同一次就诊里，表格里的值优先于叙述里摘出来的值。
+    // 出院记录正文常把当天的化验结果写一遍，那是"没有化验单时的备用来源"，
+    // 不能跟真正的化验单并列去比——比出来必然是假冲突。
     var byDate = {};
     picked.forEach(function (o) {
       var d = obsDate(o);
       (byDate[d] = byDate[d] || []).push(o);
     });
     var conflictList = null;
+    var effective = [];
     Object.keys(byDate).forEach(function (d) {
       var g = byDate[d];
-      if (conflictList || g.length < 2) return;
-      var first = g[0];
-      var diff = g.some(function (o) { return !sameValue(o.value, first.value, isNum); });
-      if (diff) conflictList = g;
+      var tab = g.filter(function (o) { return o.src !== 'narrative'; });
+      var use = tab.length ? tab : g;          // 有表格就用表格，没有才用叙述
+      effective = effective.concat(use);
+      if (!conflictList && tab.length > 1) {
+        var first = tab[0];
+        if (tab.some(function (o) { return !sameValue(o.value, first.value, isNum); })) conflictList = tab;
+      }
     });
     if (conflictList) {
       return { state: 'conflict', obs: conflictList[0], list: conflictList, dates: dates };
     }
 
     // 没有冲突时，取最近一次就诊的那条；同一日期内取置信度最高的。
-    var sorted = picked.slice().sort(function (a, b) {
+    var sorted = effective.slice().sort(function (a, b) {
       var da = obsDate(a), db = obsDate(b);
       if (da !== db) return da < db ? 1 : -1;
       return (b.confidence == null ? 0 : b.confidence) - (a.confidence == null ? 0 : a.confidence);
@@ -326,6 +334,15 @@
 
   function obsDate(o) {
     return String((o && o.date) || '').trim();
+  }
+
+  /* 报告上印的是 52.800、7.240 这种，模型照抄没错，但显示和导出都难看。
+     只收拾"整数部分 + 全部是数字"的纯数字，别的（<500、70%+、阴性）一概不动。 */
+  function tidyNumber(v) {
+    var s = String(v == null ? '' : v).trim();
+    if (!/^-?\d+\.\d+$/.test(s)) return s;
+    if (s.charAt(s.length - 1) !== '0') return s;
+    return s.replace(/0+$/, '').replace(/\.$/, '');
   }
 
   /* ---------------- 渲染：患者 ---------------- */
@@ -502,6 +519,10 @@
           if (a) {
             srcCell = '<button class="src-link" data-src="' + a.id + '">' +
               esc(assetLabel(a, c.obs.date)) + '</button>';
+            // 从叙述段落里摘出来的值：来源照样可点，但加个标记，说明它不是从化验单的表格里来的
+            if (c.obs.src === 'narrative') {
+              srcCell += ' <span class="src-tag" title="这个值是从正文叙述里摘出来的，不是化验单表格">文中</span>';
+            }
           }
         }
 
@@ -739,6 +760,7 @@
     '',
     '可选类型：血常规、生化、出凝血、免疫、病毒学、FISH、病理、骨髓流式、影像、病案首页、出院小结、其他。',
     '说明：',
+    '- 出院小结：出院记录、出院诊断书、阶段小结、出院病情证明书；标题里出现"出院"两个字基本就是它；',
     '- 生化：肝功能、肾功能、电解质、血糖、心肌酶等，合并成一张或分成几张都算生化；',
     '- 免疫：免疫球蛋白、补体、β2微球蛋白、铁蛋白、血沉、免疫固定电泳；',
     '- 影像：CT、MRI、超声、X 线、PET-CT 的文字报告（不是影像胶片本身）；',
@@ -760,14 +782,20 @@
     return { type: t, title: String(d.title || ''), confidence: d.confidence };
   }
 
-  /* 这类文书上应该出现哪些指标 = 它对应的页面 + 页眉字段，再和"本次要看"取交集 */
+  /* 这类文书上应该出现哪些指标 = 它对应的页面 + 页眉字段，再和"本次要看"取交集。
+   * 出院小结是例外：它的正文里常把当天的化验结果又写一遍，
+   * 那些值是对应化验单没上传时的备用来源，所以候选开放成"本次所有页面"。 */
   function candidatesFor(type) {
     var want = HEADER_IDS.slice();
-    (DOC_PAGES[type] || []).forEach(function (pid) {
-      var pg = window.Library.pageById(pid);
-      if (!pg) return;
-      pg.ids.forEach(function (id) { if (want.indexOf(id) === -1) want.push(id); });
-    });
+    if (type === '出院小结') {
+      targetIds().forEach(function (id) { if (want.indexOf(id) === -1) want.push(id); });
+    } else {
+      (DOC_PAGES[type] || []).forEach(function (pid) {
+        var pg = window.Library.pageById(pid);
+        if (!pg) return;
+        pg.ids.forEach(function (id) { if (want.indexOf(id) === -1) want.push(id); });
+      });
+    }
     var tgt = targetIds();
     return want.filter(function (id) { return tgt.indexOf(id) !== -1 && window.Library.byId(id); });
   }
@@ -799,7 +827,7 @@
       '输出格式：',
       '{"report_type":"血常规|生化|免疫|出凝血|病毒学|FISH|病理|骨髓流式|影像|病案首页|出院小结|其他","report_date":"YYYY-MM-DD 或 空字符串",',
       ' "items":[{"raw_name":"报告上的原文项目名","indicator":"标准代号或 null",',
-      '           "value":"原文","unit":"单位原文","ref":"参考范围原文","confidence":0.0}]}',
+      '           "value":"原文","unit":"单位原文","ref":"参考范围原文","src":"table 或 narrative","confidence":0.0}]}',
       '',
       '硬性要求：',
       '1. 只输出 JSON，不要解释，不要 markdown 代码块。',
@@ -815,13 +843,23 @@
       '不要因为它们"不像检验项目"就跳过。',
       '8. 定性结果（免疫组化的 +、−、±，FISH 的阳性/阴性，下拉框里的"未做""不详"）照原样输出，' +
       '   只写图上印着的那个，不要自己判断该是哪一种。',
-      '9. 只抽"这一页自己那张表"里的项目。叙述性段落（入院情况、住院经过、出院医嘱、讨论）里' +
-      '   顺带提到的化验数字，一律不要抽——它们属于别的文书，抽出来会和真正的化验单打架。',
+      '9. 叙述段落（入院情况、住院经过、出院医嘱、讨论区）里的数字，只有"项目名 + 数值 + 单位"紧挨着写成一句' +
+      '   完整陈述时才抽，并且 src 填 "narrative"。例如"乳酸脱氢酶 168 U/L""EBV-DNA <500 copies/mL"' +
+      '"血红蛋白:101g/L" 都要抽；而"住院 7 天""体温 36.5℃"这种跟候选指标无关的、或者没写项目名的数字，一律不要抽。',
+      '10. 表格里抽出来的项目，src 一律填 "table"。判断依据是它有没有处在一张有表头、有行的表里；' +
+      '    散落在句子中间的算 narrative。这一栏会显示给人看，填错比不填更糟。',
+      '11. 免疫组化、FISH 这类结果常常写成一长串"CD20（-），CD79α（-），CD3（+），Ki-67（70%+）"，' +
+      '    一个括号就是一个项目。请逐个拆成独立的 items，不要只报其中一两个，也不要漏掉写在行尾的。',
       ''
     ];
     if (docType && DOC_PAGES[docType]) {
-      body.push('这一页的文书类型是【' + docType + '】。候选指标只列了这类文书上才会有的项目，' +
-        '属于别的文书的项目（例如出院记录正文里提到的血常规数值）不要抽。', '');
+      body.push('这一页的文书类型是【' + docType + '】。候选指标只列了这类文书上会出现的项目，' +
+        '别的文书的项目不要抽。', '');
+      if (docType === '出院小结' || docType === '影像' || docType === '病理') {
+        body.push('这一类文书的正文本身就是一段叙述，没有整齐的表格。按第 9 条：正文里写成' +
+          '"项目名 + 数值 + 单位"的句子照抽，src 填 "narrative"。' +
+          '它们是对应化验单没上传时的备用来源，不要因为"它不是化验单"就整段跳过。', '');
+      }
     }
     body.push('候选指标：');
     body.push(lines);
@@ -885,6 +923,8 @@
         return;
       }
       var v = it.value == null ? '' : String(it.value).trim();
+      var ind0 = window.Library.byId(hit.id);
+      if (!ind0 || (ind0.type || 'num') === 'num') v = tidyNumber(v);
       S.observations.push({
         id: uid('obs'),
         patientId: asset.patientId,
@@ -898,6 +938,7 @@
         unit: it.unit || '',
         ref: it.ref || '',
         date: data.report_date || '',
+        src: String(it.src || '').toLowerCase() === 'narrative' ? 'narrative' : 'table',
         confidence: typeof it.confidence === 'number' ? it.confidence : null
       });
       added++;
@@ -1477,6 +1518,8 @@
         masked: masked,
         source: a ? (a.kind === 'pdf' ? '报告' + a.fileIndex + '-第' + a.pageNo + '页' : '报告' + a.fileIndex) : '',
         sourceType: a && a.reportType ? a.reportType : '',
+        docType: a && a.docType ? a.docType : '',
+        fromNarrative: !!(c.obs && c.obs.src === 'narrative'),
         confidence: c.obs && c.obs.confidence != null ? c.obs.confidence : null
       };
     }).filter(Boolean);
@@ -1578,20 +1621,26 @@
     var p = current();
     if (!p) { toast('没有可导出的内容', 'err'); return; }
     var ids = targetIds();
-    var head = ['患者', '指标代号', '指标名称', '结果', '单位', '参考范围', '状态', '来源'];
+    var head = ['患者', '指标代号', '指标名称', '结果', '单位', '参考范围', '状态', '来源', '报告类型', '取值方式'];
     var stateName = STATE_NAME;
 
     var rows = ids.map(function (id) {
       var ind = window.IndicatorLib.byId(id);
       var c = cellState(p.id, id);
       var src = '';
+      var docType = '';
+      var how = '';
       if (c.obs && c.obs.assetId) {
         var a = S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0];
-        if (a) src = a.kind === 'pdf' ? '报告' + a.fileIndex + '-第' + a.pageNo + '页' : '报告' + a.fileIndex;
+        if (a) {
+          src = a.kind === 'pdf' ? '报告' + a.fileIndex + '-第' + a.pageNo + '页' : '报告' + a.fileIndex;
+          docType = a.docType || '';
+        }
+        how = c.obs.src === 'narrative' ? '文中摘录' : '表格';
       }
       var val = c.obs ? c.obs.value : '';
       if (val && IDENT_IDS[id] && hideIdent()) val = '（已隐藏）';
-      return [p.code, ind.id, ind.name, val, ind.unit, ind.ref, stateName[c.state], src];
+      return [p.code, ind.id, ind.name, val, ind.unit, ind.ref, stateName[c.state], src, docType, how];
     });
 
     var csv = [head].concat(rows).map(function (r) {

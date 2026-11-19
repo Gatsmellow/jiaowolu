@@ -417,6 +417,14 @@ tr.absent .ind-name > div > div:first-child { color: var(--muted); }
 }
 .src-link:hover { text-decoration: underline; }
 
+/* 从正文叙述里摘出来的值，来源旁边加个小标记 */
+.src-tag {
+  display: inline-block; margin-left: 2px; padding: 0 4px;
+  border-radius: 3px; background: #eef1f6; color: #5b6472;
+  font-size: 10.5px; line-height: 15px; vertical-align: 1px;
+  cursor: help;
+}
+
 /* ---------- 表格里的页面分组 ---------- */
 .group-row td {
   background: #eef2f8;

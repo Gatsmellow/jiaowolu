@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -175,6 +176,68 @@ def main() -> None:
     )
 
 
+def make_narrative(filename: str, outdir: str | None = None) -> None:
+    """出院记录：正文是一段话，化验值散在句子里。
+
+    专门用来验证"叙述里的定量陈述能不能抽出来、并且不跟化验单打架"。
+    故意让血红蛋白写成 101，和同一天血常规的 174 对不上——
+    正确的行为是：显示化验单的 174，不去报"两处不一致"。
+    """
+    W2, H2 = 1240, 1500
+    img = Image.new("RGB", (W2 * S, H2 * S), "white")
+    d = ImageDraw.Draw(img)
+
+    def t(x, y, s, size=24, color=INK):
+        d.text((x * S, y * S), s, font=f(size), fill=color)
+
+    def wrap(x, y, text, size=24, width=36, gap=38):
+        # 按"拉丁字母/数字串"和"单个汉字"切块，只在块与块之间断行，
+        # 免得把 8.42×10^9/L 这种数字切成两半——真实病历不会这么断。
+        # 先把"数字 + 单位"用不断行空格粘起来，再按块排版，
+        # 免得出现"乳酸脱氢酶 168" 换行 "U/L" 这种把数值和单位拆开的情况。
+        text = re.sub(r"(\d)\s+([A-Za-zμ%/^])", "\\1\u00a0\\2", text)
+        chunks = re.findall(r"[A-Za-z0-9.\^/%<>×·μ\u00a0\-]+|.", text)
+        line = ""
+        for ch in chunks:
+            if len(line) + len(ch) > width and line:
+                t(x, y, line, size)
+                y += gap
+                line = ""
+            line += ch
+        if line:
+            t(x, y, line, size)
+            y += gap
+        return y
+
+    d.text((W2 * S // 2, 60 * S), "上海市某三甲医院", font=f(34), fill=INK, anchor="mm")
+    d.text((W2 * S // 2, 110 * S), "出 院 记 录", font=f(27), fill=GREY, anchor="mm")
+    d.line([(70 * S, 150 * S), ((W2 - 70) * S, 150 * S)], fill=INK, width=2 * S)
+
+    t(80, 176, "姓名：张建国    性别：男    年龄：52 岁    住院号：ZY2026110037", 23)
+    t(80, 214, "入院时间：2026-11-05    出院时间：2026-11-10    住院天数：5 天", 23)
+    t(80, 252, "出院诊断：弥漫大B细胞淋巴瘤（IV 期）", 23)
+    d.line([(70 * S, 292 * S), ((W2 - 70) * S, 292 * S)], fill="#dcdcdc")
+
+    t(80, 312, "住院经过：", 24)
+    y = wrap(80, 352,
+             "入院后完善相关检查，2026-11-09 复查血常规：白细胞计数 8.42×10^9/L，"
+             "血红蛋白 101 g/L，血小板计数 273×10^9/L；2026-11-09 生化：乳酸脱氢酶 168 U/L，"
+             "谷丙转氨酶 26 U/L，肌酐 92 μmol/L，钾 4.5 mmol/L；2026-11-09 EBV-DNA <500 copies/mL。"
+             "2026-11-10 行 ABVD 方案化疗，过程顺利，无明显不良反应。")
+
+    t(80, 640, "出院医嘱：", 24)
+    wrap(80, 680, "1. 注意休息，避免受凉；2. 出院后 1 周复查血常规、肝肾功能；"
+                  "3. 下次入院时间 2026-12-05，请提前 1 天电话联系床位；4. 不适随诊。")
+
+    t(80, 900, "医师签名：陈 敏", 23, GREY)
+    t(80, 940, "记录时间：2026-11-10 10:20", 22, GREY)
+
+    os.makedirs(outdir or OUT, exist_ok=True)
+    path = os.path.join(outdir or OUT, filename)
+    img.resize((W2, H2), Image.LANCZOS).save(path, "JPEG", quality=92)
+    print("saved", path, W2, "x", H2)
+
+
 def make_batch() -> None:
     """10 份"一次上传"用的批量样本：7 类报告 + 第二次就诊 + 一张拍糊的。
 
@@ -280,6 +343,8 @@ def make_batch() -> None:
         ("尿素氮", "4.9", "mmol/L", "3.1-8.0"),
         ("肌酐", "79", "μmol/L", "57-97"),
     ], B, outdir=BATCH)
+
+    make_narrative("discharge-20261110.jpg", outdir=BATCH)
 
 
 if __name__ == "__main__":
