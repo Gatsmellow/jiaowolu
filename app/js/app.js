@@ -452,9 +452,25 @@
    * 返回 { value, unit }；unit 为空表示原文里没单位。 */
   function splitValueUnit(v) {
     var s = String(v == null ? '' : v).trim();
+    // 科学计数法（1.2E+03、5.4e-2）整体是数值，不能把 E+03 当成单位拆走
+    if (/^-?\d+(?:\.\d+)?[Ee][+-]?\d+$/.test(s)) return { value: s, unit: '' };
     var m = s.match(/^(-?\d+(?:\.\d+)?)\s*(.*)$/);
     if (!m) return { value: s, unit: '' };
     return { value: m[1], unit: (m[2] || '').trim() };
+  }
+
+  /* 定性结果统一写法：模型有时把 ( + ) 连括号一起抄，
+   * 而库里存的是 "+"。只处理"整个值就是一个括号包着的符号"这种情况。 */
+  function normalizeQual(v) {
+    var s = String(v == null ? '' : v).trim();
+    var m = s.match(/^[（(]\s*([+\-±＋－])\s*[）)]$/);
+    if (m) {
+      var ch = m[1];
+      if (ch === '＋') ch = '+';
+      if (ch === '－') ch = '-';
+      return ch;
+    }
+    return s;
   }
 
   /* ---------------- 渲染：患者 ---------------- */
@@ -1087,6 +1103,8 @@
         var su = splitValueUnit(v);
         v = tidyNumber(su.value);
         if (!unit && su.unit) unit = su.unit;
+      } else {
+        v = normalizeQual(v);
       }
       S.observations.push({
         id: uid('obs'),
