@@ -379,11 +379,13 @@
     box.innerHTML = list.map(function (a) {
       var label = a.kind === 'pdf' ? '报告 ' + a.fileIndex + ' · 第 ' + a.pageNo + ' 页' : '报告 ' + a.fileIndex;
       if (a.docType && a.status === 'done') label += ' · ' + a.docType;
-      var st = a.status === 'done' ? '<span class="asset-state ok">已识别</span>'
-        : a.status === 'running' ? '<span class="asset-state run">识别中</span>'
-          : a.status === 'skipped' ? '<span class="asset-state" title="长边不到 900 像素，没送去识别">已跳过</span>'
-            : a.status === 'error' ? '<span class="asset-state err">失败</span>'
-            : '<span class="asset-state">待识别</span>';
+      var st;
+      if (a.status === 'done') st = '<span class="asset-state ok">已识别</span>';
+      else if (a.status === 'running') st = '<span class="asset-state run">识别中</span>';
+      else if (a.status === 'skipped') st = '<span class="asset-state" title="长边不到 900 像素，没送去识别">已跳过</span>';
+      else if (a.status === 'error') {
+        st = '<span class="asset-state err" title="' + esc(a.error || '') + '">失败</span>';
+      } else st = '<span class="asset-state">待识别</span>';
       if (a.lowRes) st = '<span class="asset-state err" title="长边 ' + Math.max(a.width, a.height) + ' 像素，太小，读不出小字">图太小</span>';
       return '<div class="asset' + (a.lowRes ? ' lowres' : '') + '" data-aid="' + a.id + '" title="' + esc(a.name) + '">' +
         '<img src="' + a.dataUrl + '" alt="">' +
@@ -888,11 +890,25 @@
   function parseJson(text) {
     var t = String(text || '').trim();
     t = t.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
-    var a = t.indexOf('{'), b = t.lastIndexOf('}');
-    if (a === -1 || b === -1 || b <= a) throw new Error('模型没有返回 JSON');
-    var obj = JSON.parse(t.slice(a, b + 1));
-    if (!obj || typeof obj !== 'object') throw new Error('返回的 JSON 结构不对');
-    return obj;
+    var a = t.indexOf('{');
+    if (a === -1) throw new Error('模型没有返回 JSON');
+    var body = t.slice(a);
+
+    var exact = body.slice(0, body.lastIndexOf('}') + 1);
+    try { return JSON.parse(exact); } catch (e) { /* 继续抢救 */ }
+
+    /* 走到这里，多半是"写了一半被截断"。从后往前找最后一个能闭合的位置，
+       把 items 数组和根对象补上，能救回几条就救回几条——总比整页判失败好。 */
+    for (var i = body.lastIndexOf('}'); i > 0; i = body.lastIndexOf('}', i - 1)) {
+      var fixed = body.slice(0, i + 1) + ']}';
+      try {
+        var obj = JSON.parse(fixed);
+        if (obj && typeof obj === 'object') return obj;
+      } catch (e2) { /* 再往前退一个对象 */ }
+    }
+    var err = new Error('模型返回的 JSON 不完整，通常是这一页内容太多、输出被截断了。');
+    err.code = 'badjson';
+    throw err;
   }
 
   async function recognizeAsset(asset) {
@@ -912,8 +928,22 @@
     var items = [];
     var res = null;
     if (ids.length) {
-      res = await window.Model.vision(asset.dataUrl, buildPrompt(ids, asset.pageText, cls.type));
-      data = parseJson(res.text);
+      var prompt = buildPrompt(ids, asset.pageText, cls.type);
+      // 先给 2400 的额度；如果被截断或写空，换 6000 再来一次。
+      // 实测"内容多的页"（病理、出院记录）会卡在这条线上，跟图片清不清楚无关。
+      var budgets = [2400, 6000];
+      for (var bi = 0; bi < budgets.length; bi++) {
+        try {
+          res = await window.Model.vision(asset.dataUrl, prompt, { maxTokens: budgets[bi] });
+          data = parseJson(res.text);
+          asset.retried = bi > 0;
+          break;
+        } catch (e) {
+          var code = e.code || '';
+          var retryable = code === 'truncated' || code === 'empty' || code === 'badjson';
+          if (!retryable || bi === budgets.length - 1) throw e;
+        }
+      }
       items = Array.isArray(data.items) ? data.items : [];
     }
 
@@ -956,6 +986,22 @@
     asset.reportDate = data.report_date || '';
     asset.unmatched = unmatched;
     return { added: added, unmatched: unmatched, ms: res ? res.ms : 0, usage: res ? res.usage : null, type: cls.type };
+  }
+
+  /* 单页重试：失败的那一份点一下就重来，不用整批重跑 */
+  async function retryOne(asset) {
+    if (!asset || asset.status === 'running') return;
+    asset.status = 'running';
+    asset.error = '';
+    renderAssets();
+    try {
+      await recognizeAsset(asset);
+    } catch (e) {
+      asset.status = 'error';
+      asset.error = e.message || String(e);
+      toast('这一页还是失败：' + asset.error, 'err');
+    }
+    renderAll();
   }
 
   async function runRecognize() {
@@ -1792,7 +1838,15 @@
 
     $('#asset-strip').addEventListener('click', function (e) {
       var a = e.target.closest('[data-aid]');
-      if (a) openSource(a.getAttribute('data-aid'));
+      if (!a) return;
+      var aid = a.getAttribute('data-aid');
+      var asset = S.assets.filter(function (x) { return x.id === aid; })[0];
+      // 失败的那一份，点一下就单独重试它，不用整批重跑
+      if (asset && asset.status !== 'done' && asset.status !== 'running') {
+        retryOne(asset);
+        return;
+      }
+      openSource(aid);
     });
 
     $('#btn-run').addEventListener('click', runRecognize);
@@ -1929,6 +1983,7 @@
     keepAwake();
     // 暴露给控制台，方便调试
     window.__S = S;
+    window.__parseJson = parseJson;
   }
 
   if (document.readyState === 'loading') {

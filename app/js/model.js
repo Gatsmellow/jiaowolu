@@ -127,8 +127,10 @@
     var data;
     try { data = JSON.parse(raw); } catch (e) { throw new Error('模型返回的不是 JSON。'); }
 
-    var msg = data.choices && data.choices[0] && data.choices[0].message;
+    var choice = (data.choices && data.choices[0]) || {};
+    var msg = choice.message;
     var text = (msg && (msg.content || '')) || '';
+    var finish = choice.finish_reason || '';
     var u = data.usage || {};
 
     usage.calls++;
@@ -137,7 +139,18 @@
     usage.ms += ms;
 
     if (!text.trim()) {
-      throw new Error('模型返回了空内容。图片可能太小或太模糊，也可能是这个模型不支持图片输入。');
+      var e1 = new Error(finish === 'length'
+        ? '模型的输出额度在思考阶段就用完了（不是图片的问题），换更大的额度重试。'
+        : '模型返回了空内容。图片可能太小或太模糊，也可能是这个模型不支持图片输入。');
+      e1.code = finish === 'length' ? 'truncated' : 'empty';
+      throw e1;
+    }
+    if (finish === 'length') {
+      // 内容写到一半被截断：JSON 多半是残的，交给上层用更大额度重试
+      var e2 = new Error('这一页要写的内容超过了模型单次输出上限，结果被截断了。');
+      e2.code = 'truncated';
+      e2.partial = text;
+      throw e2;
     }
     return { text: text, usage: u, ms: ms };
   }
