@@ -361,7 +361,13 @@
 
     if (!S.patients.length) {
       box.innerHTML = '<div class="patient-meta">还没有患者</div>';
+      return;
     }
+
+    /* 患者多的时候列表会滚动。新建或切换后，把当前这位滚进视野，
+       否则刚点"添加患者"生成的新患者正好落在可视区外，看着像没加上。 */
+    var act = box.querySelector('.patient.active');
+    if (act) act.scrollIntoView({ block: 'nearest' });
   }
 
   /* ---------------- 渲染：报告缩略图 ---------------- */

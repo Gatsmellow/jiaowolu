@@ -85,15 +85,17 @@ body {
 .side {
   border-right: 1px solid var(--line);
   background: var(--card);
-  padding: 16px 14px;
+  padding: 14px 12px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 13px;
   overflow-y: auto;
 }
 
 .side-block { display: flex; flex-direction: column; gap: 8px; }
-.side-block.grow { flex: 1 1 auto; min-height: 90px; }
+/* 患者多的时候这一块会被压缩：必须自己裁剪 + 内部滚动，
+   否则里面的卡片会溢出来盖住下面的"开始识别"，按钮就点不到了 */
+.side-block.grow { flex: 1 1 auto; min-height: 168px; overflow: hidden; }
 .side-block.actions { gap: 8px; }
 
 .side-label {
@@ -129,7 +131,12 @@ body {
 .stat.green b { color: var(--green); }
 
 /* 患者列表 */
-.patient-list { display: flex; flex-direction: column; gap: 6px; }
+.patient-list {
+  display: flex; flex-direction: column; gap: 6px;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding-right: 2px;               /* 给滚动条留一点位置 */
+}
+.side-block.grow > .btn { flex: 0 0 auto; }
 
 .patient {
   display: flex;
@@ -537,7 +544,7 @@ tr.group-hidden { display: none; }
 .link.tiny { font-size: 11px; letter-spacing: 0; text-transform: none; }
 .link.danger { color: var(--red); }
 
-.page-checks { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+.page-checks { display: flex; flex-direction: column; gap: 4px; max-height: 196px; overflow-y: auto; }
 .page-check {
   display: flex;
   align-items: center;
