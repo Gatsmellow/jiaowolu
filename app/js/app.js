@@ -38,7 +38,8 @@
     '其他': []
   };
   /* 页眉字段：每一份单据的抬头都可能印着，跟文书类型无关 */
-  var HEADER_IDS = ['NAME', 'SEX', 'AGE', 'ADMNO', 'VISITDATE', 'HOSP'];
+  // 页眉/身份类字段：只从"病案首页"取，别的文书一律不抄（省 token，也免掉"男/男性"这种噪音）
+  var HEADER_IDS = ['NAME', 'SEX', 'AGE', 'VISITAGE', 'ADMNO', 'VISITDATE', 'HOSP'];
 
   var S = {
     patients: [],
@@ -50,6 +51,93 @@
     collapse: {},              // 页面分组是展开还是收起，用户点过就记住
     seq: { patient: 0, asset: 0, obs: 0 }
   };
+
+  /* ---------------- 本地缓存：不小心关掉页面也不丢 ----------------
+   * 存在 IndexedDB（图片是 dataURL，几 MB，localStorage 装不下）。
+   * 只存在这台电脑的浏览器里，不上传；24 小时后自动作废，避免哪天打开
+   * 发现是上周的旧任务。清空本次任务时一并删掉。 */
+  var CACHE_DB = 'jiaowolu', CACHE_STORE = 'session', CACHE_TTL = 24 * 3600 * 1000;
+  var cacheDb = null, cacheTimer = null;
+
+  function cacheOpen() {
+    return new Promise(function (resolve) {
+      if (cacheDb) return resolve(cacheDb);
+      if (!window.indexedDB) return resolve(null);
+      var req;
+      try { req = indexedDB.open(CACHE_DB, 1); } catch (e) { return resolve(null); }
+      req.onupgradeneeded = function () {
+        if (!req.result.objectStoreNames.contains(CACHE_STORE)) req.result.createObjectStore(CACHE_STORE);
+      };
+      req.onsuccess = function () { cacheDb = req.result; resolve(cacheDb); };
+      req.onerror = function () { resolve(null); };
+    });
+  }
+
+  function cachePut() {
+    return cacheOpen().then(function (db) {
+      if (!db) return;
+      return new Promise(function (resolve) {
+        try {
+          var tx = db.transaction(CACHE_STORE, 'readwrite');
+          tx.objectStore(CACHE_STORE).put({
+            at: Date.now(),
+            patients: S.patients,
+            currentId: S.currentId,
+            assets: S.assets,
+            observations: S.observations,
+            seq: S.seq
+          }, 'session');
+          tx.oncomplete = function () { resolve(); };
+          tx.onerror = function () { resolve(); };
+          tx.onabort = function () { resolve(); };
+        } catch (e) { resolve(); }
+      });
+    }).catch(function () { /* 存不下就算了，不影响用 */ });
+  }
+
+  /* 每次改完状态都会走 renderAll，这里节流 700ms 存一次 */
+  function cacheSchedule() {
+    clearTimeout(cacheTimer);
+    cacheTimer = setTimeout(cachePut, 700);
+  }
+
+  function cacheGet() {
+    return cacheOpen().then(function (db) {
+      if (!db) return null;
+      return new Promise(function (resolve) {
+        try {
+          var tx = db.transaction(CACHE_STORE, 'readonly');
+          var rq = tx.objectStore(CACHE_STORE).get('session');
+          rq.onsuccess = function () { resolve(rq.result || null); };
+          rq.onerror = function () { resolve(null); };
+        } catch (e) { resolve(null); }
+      });
+    }).catch(function () { return null; });
+  }
+
+  function cacheClear() {
+    return cacheOpen().then(function (db) {
+      if (!db) return;
+      try {
+        var tx = db.transaction(CACHE_STORE, 'readwrite');
+        tx.objectStore(CACHE_STORE).delete('session');
+      } catch (e) { /* ignore */ }
+    }).catch(function () {});
+  }
+
+  /* 把上次的任务装回来。跑一半被关掉的，状态退回"待识别"。 */
+  function restoreSession(saved) {
+    S.patients = saved.patients || [];
+    S.assets = (saved.assets || []).map(function (a) {
+      if (a.status === 'running') a.status = 'pending';
+      return a;
+    });
+    S.observations = saved.observations || [];
+    S.seq = saved.seq || S.seq;
+    S.currentId = S.patients.some(function (p) { return p.id === saved.currentId; })
+      ? saved.currentId
+      : (S.patients[0] ? S.patients[0].id : null);
+  }
 
   /* ---------------- 小工具 ---------------- */
 
@@ -224,6 +312,19 @@
   }
 
   // 两个值算不算同一个数/同一段话
+  /* 文本类字段放宽一点：医院不同、录入习惯不同，同一个人会被写成
+   * "男" / "男性"、"汉族" / "汉"、"40" / "40岁"。
+   * 这些差异对人来说没有意义，报出来只会淹掉真正该看的红点。
+   * 身份证和电话仍然逐字比对——它们是用来区分人的。 */
+  function looseText(v) {
+    var s = String(v == null ? '' : v).trim();
+    s = s.replace(/\s+/g, '');
+    s = s.replace(/(周岁|岁)$/, '');
+    s = s.replace(/^(男性|男孩|男)$/, '男').replace(/^(女性|女孩|女)$/, '女');
+    s = s.replace(/^汉$/, '汉族');
+    return s;
+  }
+
   function sameValue(a, b, isNum) {
     var sa = String(a == null ? '' : a).trim();
     var sb = String(b == null ? '' : b).trim();
@@ -234,7 +335,7 @@
       var nb = parseFloat(sb.replace(/[^0-9.\-]/g, ''));
       if (!isNaN(na) && !isNaN(nb)) return Math.abs(na - nb) < 1e-9;
     }
-    return false;
+    return looseText(sa) === looseText(sb);
   }
 
   /* ---------------- 关于"跨页" ----------------
@@ -343,6 +444,17 @@
     if (!/^-?\d+\.\d+$/.test(s)) return s;
     if (s.charAt(s.length - 1) !== '0') return s;
     return s.replace(/0+$/, '').replace(/\.$/, '');
+  }
+
+  /* 模型有时候把单位一起塞进结果："168 U/L"、"5.54*10^9/L"。
+   * 数值项的结果列只该有数，单位要回到单位列去，否则导出会变成
+   * "结果=5.54*10^9/L、单位=10^9/L" 这种重复。
+   * 返回 { value, unit }；unit 为空表示原文里没单位。 */
+  function splitValueUnit(v) {
+    var s = String(v == null ? '' : v).trim();
+    var m = s.match(/^(-?\d+(?:\.\d+)?)\s*(.*)$/);
+    if (!m) return { value: s, unit: '' };
+    return { value: m[1], unit: (m[2] || '').trim() };
   }
 
   /* ---------------- 渲染：患者 ---------------- */
@@ -569,6 +681,7 @@
     renderAssets();
     renderStats();
     renderTable();
+    cacheSchedule();
   }
 
   /* ---------------- 时间轴 ---------------- */
@@ -794,9 +907,17 @@
    * 出院小结是例外：它的正文里常把当天的化验结果又写一遍，
    * 那些值是对应化验单没上传时的备用来源，所以候选开放成"本次所有页面"。 */
   function candidatesFor(type) {
-    var want = HEADER_IDS.slice();
+    /* 页眉/身份字段（姓名、性别、年龄、住院号、就诊日期、医院）只从"病案首页"取。
+     * 为什么：同一个患者每一份化验单的页眉都会重复印一遍，让模型到处抄只会
+     * 制造"男 / 男性""40 / 40岁"这种没意义的差异，还白花 token。
+     * 病案首页才是这些字段的正式出处。 */
+    var want = [];
     if (type === '出院小结') {
-      targetIds().forEach(function (id) { if (want.indexOf(id) === -1) want.push(id); });
+      // 出院记录的正文里常把当天的化验结果又写一遍，那些值是对应化验单
+      // 没上传时的备用来源，所以候选开放成"本次所有页面"（页眉字段除外）
+      targetIds().forEach(function (id) {
+        if (HEADER_IDS.indexOf(id) === -1 && want.indexOf(id) === -1) want.push(id);
+      });
     } else {
       (DOC_PAGES[type] || []).forEach(function (pid) {
         var pg = window.Library.pageById(pid);
@@ -959,8 +1080,14 @@
         return;
       }
       var v = it.value == null ? '' : String(it.value).trim();
+      var unit = it.unit || '';
       var ind0 = window.Library.byId(hit.id);
-      if (!ind0 || (ind0.type || 'num') === 'num') v = tidyNumber(v);
+      if (!ind0 || (ind0.type || 'num') === 'num') {
+        // "168 U/L" 拆成 值=168、单位=U/L；模型没给单位时用拆出来的
+        var su = splitValueUnit(v);
+        v = tidyNumber(su.value);
+        if (!unit && su.unit) unit = su.unit;
+      }
       S.observations.push({
         id: uid('obs'),
         patientId: asset.patientId,
@@ -971,7 +1098,7 @@
         score: hit.score,
         warn: hit.warn || '',
         value: v,
-        unit: it.unit || '',
+        unit: unit,
         ref: it.ref || '',
         date: data.report_date || '',
         src: String(it.src || '').toLowerCase() === 'narrative' ? 'narrative' : 'table',
@@ -1888,6 +2015,7 @@
       S.patients = [];
       S.currentId = null;
       window.Model.resetUsage();
+      cacheClear();
       addPatient(true);
       renderAll();
       toast('已清空', 'ok');
@@ -1974,13 +2102,27 @@
 
   /* ---------------- 启动 ---------------- */
 
-  function init() {
-    addPatient(true);
+  async function init() {
+    // 先把上次没做完的任务装回来（24 小时内有效）
+    var saved = null;
+    try { saved = await cacheGet(); } catch (e) { saved = null; }
+    if (saved && saved.at && (Date.now() - saved.at) < CACHE_TTL
+      && Array.isArray(saved.patients) && saved.patients.length) {
+      restoreSession(saved);
+    }
+
+    if (!S.patients.length) addPatient(true);
     bind();
     updatePill();
     renderAll();
     startHeartbeat();
     keepAwake();
+
+    if (saved && S.assets.length) {
+      var n = S.assets.length;
+      toast('已恢复上次的任务：' + S.patients.length + ' 位患者、' + n + ' 份报告（存在本机，24 小时后自动清理）', 'ok');
+    }
+
     // 暴露给控制台，方便调试
     window.__S = S;
     window.__parseJson = parseJson;
