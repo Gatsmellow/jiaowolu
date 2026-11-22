@@ -1343,6 +1343,9 @@
     var ind = window.Library.byId(indId);
     if (!ind) return;
 
+    var isConflict = c.state === 'conflict';
+    var span = c.dates && c.dates.length > 1;
+
     var rows = (c.list || []).map(function (o) {
       var a = S.assets.filter(function (x) { return x.id === o.assetId; })[0];
       return '<tr>' +
@@ -1352,13 +1355,11 @@
         '<td class="tiny muted">' + esc(o.rawName || '') + '</td>' +
         '<td class="row-act">' +
           (a ? '<button class="link" data-src="' + a.id + '">看原页</button>' : '') +
-          '<button class="link" data-pick="' + esc(o.id) + '">以此为准</button>' +
+          // 只有"同一次就诊里对不上"才需要裁决；跨次就诊的差异不该有一键作废的入口
+          (isConflict ? '<button class="link" data-pick="' + esc(o.id) + '">以此为准</button>' : '') +
         '</td>' +
         '</tr>';
     }).join('');
-
-    var isConflict = c.state === 'conflict';
-    var span = c.dates && c.dates.length > 1;
 
     openModal(
       '<h3>' + esc(ind.name) + (isConflict ? ' · 同一次就诊里对不上' : ' · 各次就诊的值') + '</h3>' +
@@ -1370,20 +1371,23 @@
         '<th>来源</th><th>读到的值</th><th>参考范围</th><th>原文项目名</th><th></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>' +
       (isConflict
-        ? '<p class="note">点"以此为准"，其余来源会被丢掉，这一项立即变成已识别；也可以直接回到表格里改这个值。</p>'
+        ? '<p class="note">点"以此为准"，同一天的其余来源会被丢掉，这一项立即变成已识别；别的就诊记录的数值不受影响。也可以直接回到表格里改这个值。</p>'
         : (span ? '<p class="note">这里只做对照，不用裁决——它们本来就是不同时间的两次检查。</p>' : '')) +
       '',
       'wide'
     );
   }
 
-  /* 人工裁决：认了某一条，同患者同指标的其它来源就作废——否则它永远红着。 */
+  /* 人工裁决：认了某一条，**同一天**的其它来源作废——否则它永远红着。
+     别的就诊日的记录必须留着：那是历史，不是这次的错。 */
   function pickObservation(obsId) {
     var keep = S.observations.filter(function (o) { return o.id === obsId; })[0];
     if (!keep) return;
+    var keepDate = obsDate(keep);
     S.observations = S.observations.filter(function (o) {
       if (o.id === obsId) return true;
-      return !(o.patientId === keep.patientId && o.indicatorId === keep.indicatorId);
+      if (o.patientId !== keep.patientId || o.indicatorId !== keep.indicatorId) return true;
+      return obsDate(o) !== keepDate;   // 只作废同一天的
     });
     keep.method = 'manual';          // 人工确认过的，不再因为置信度低而标黄
     keep.confidence = 1;
