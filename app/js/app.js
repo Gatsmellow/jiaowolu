@@ -185,8 +185,14 @@
    *
    * 必填精确到指标而不是整页：真正必须有的往往是某几项（血红蛋白、尿酸），
    * 而整页缺失有时并不算问题（这次没做增强CT）。页面上的那个勾只是"整页批量"开关。 */
-  var SEL_KEY = 'jiaowolu.selectedPages.v3';
+  var SEL_KEY = 'jiaowolu.selectedPages.v4';
   var selected = null;
+
+  /* 必填是"派生"出来的，不是存下来的：
+       本次生效必填 =（勾上的各组预设的并集 ∪ 本次手动加的）− 本次手动减的
+     这样组一勾上预设就自动生效、组一取消就自动失效，不用在开关里做加减账。 */
+  var reqCache = null;
+  function invalidateReq() { reqCache = null; }
 
   function loadSelected() {
     if (selected) return selected;
@@ -196,19 +202,37 @@
       try {
         var obj = JSON.parse(raw);
         if (obj && Array.isArray(obj.ids)) {
-          selected = { ids: obj.ids, reqIds: Array.isArray(obj.reqIds) ? obj.reqIds : [] };
+          selected = {
+            ids: obj.ids,
+            add: Array.isArray(obj.add) ? obj.add : [],
+            drop: Array.isArray(obj.drop) ? obj.drop : []
+          };
           return selected;
         }
       } catch (e) { /* 存档坏了就重来 */ }
     }
-    // 上一版存的是"必填页面"，升级时把它展开成"必填指标"
+    // 上一版把必填直接存在 reqIds 里，升级时整批搬进"手动加的"
+    var prev = null;
+    try { prev = localStorage.getItem('jiaowolu.selectedPages.v3'); } catch (e) { /* ignore */ }
+    if (prev) {
+      try {
+        var p3 = JSON.parse(prev);
+        if (p3 && Array.isArray(p3.ids)) {
+          selected = { ids: p3.ids, add: Array.isArray(p3.reqIds) ? p3.reqIds.slice() : [], drop: [] };
+          invalidateReq();
+          saveSelected();
+          return selected;
+        }
+      } catch (e) { /* ignore */ }
+    }
+    // 再往前是"必填页面"，展开成页面里所有指标
     var legacy = null;
     try { legacy = localStorage.getItem('jiaowolu.selectedPages.v2'); } catch (e) { /* ignore */ }
     if (legacy) {
       try {
         var old = JSON.parse(legacy);
         if (old && Array.isArray(old.ids)) {
-          selected = { ids: old.ids, reqIds: unionOf(Array.isArray(old.req) ? old.req : []) };
+          selected = { ids: old.ids, add: unionOf(Array.isArray(old.req) ? old.req : []), drop: [] };
           saveSelected();
           return selected;
         }
@@ -217,12 +241,42 @@
     // 默认：只勾"默认要看"的页面（on:false 的先不勾，需要时自己勾上），没有一个算必填
     var on = window.Library.pages().filter(function (p) { return p.on !== false; });
     if (!on.length) on = window.Library.pages();
-    selected = { ids: on.map(function (p) { return p.id; }), reqIds: [] };
+    selected = { ids: on.map(function (p) { return p.id; }), add: [], drop: [] };
     return selected;
   }
 
   function saveSelected() {
+    invalidateReq();
     try { localStorage.setItem(SEL_KEY, JSON.stringify(selected)); } catch (e) { /* 存不下算了 */ }
+  }
+
+  /* 改"这一项这次要不要必填"：只动本次的加减，不写回组预设 */
+  function setReq(indId, want) {
+    var sel = loadSelected();
+    var ai = sel.add.indexOf(indId);
+    var di = sel.drop.indexOf(indId);
+    if (want) {
+      if (ai === -1) sel.add.push(indId);
+      if (di !== -1) sel.drop.splice(di, 1);
+    } else {
+      if (ai !== -1) sel.add.splice(ai, 1);
+      if (di === -1) sel.drop.push(indId);
+    }
+  }
+
+  function setReqOfPage(pageId, want) {
+    var page = window.Library.pageById(pageId);
+    if (!page) return;
+    page.ids.forEach(function (x) { if (window.Library.byId(x)) setReq(x, want); });
+  }
+
+  /* 页面退出本次任务时，把它名下指标的加减记录一起清掉，免得留下看不见的账 */
+  function forgetReqOfPage(pageId) {
+    var page = window.Library.pageById(pageId);
+    if (!page) return;
+    var sel = loadSelected();
+    sel.add = sel.add.filter(function (x) { return page.ids.indexOf(x) === -1; });
+    sel.drop = sel.drop.filter(function (x) { return page.ids.indexOf(x) === -1; });
   }
 
   function unionOf(pageIds) {
@@ -240,19 +294,28 @@
   /* 这次要抽哪些项。指标被删掉以后页面里可能留着不存在的 id，跳过，别让脏引用打空表。 */
   function targetIds() { return unionOf(loadSelected().ids); }
 
-  /* 缺了要标红的那几项。默认空——没有必选项，就没有平白无故的红。 */
+  /* 缺了要标红的那几项 = 勾上的各组预设 ∪ 本次手动加 − 本次手动减。默认空。 */
   function requiredIds() {
-    return loadSelected().reqIds.filter(function (id) { return !!window.Library.byId(id); });
+    if (reqCache) return reqCache;
+    var sel = loadSelected();
+    var out = [];
+    function push(x) {
+      if (out.indexOf(x) === -1 && window.Library.byId(x)) out.push(x);
+    }
+    activeGroups().forEach(function (g) { (g.reqIds || []).forEach(push); });
+    (sel.add || []).forEach(push);
+    reqCache = out.filter(function (x) { return (sel.drop || []).indexOf(x) === -1; });
+    return reqCache;
   }
 
-  function isRequired(indId) { return loadSelected().reqIds.indexOf(indId) !== -1; }
+  function isRequired(indId) { return requiredIds().indexOf(indId) !== -1; }
 
   /* 页面上那个"必填"勾只是批量开关：勾上=整页指标都必填，取消=整页都不必填。
      只标了一部分时显示成半选，鼠标停上去能看到是几项里的几项。 */
   function pageRowHtml(p, sel) {
     var on = sel.ids.indexOf(p.id) !== -1;
     var total = p.ids.length;
-    var need = p.ids.filter(function (id) { return sel.reqIds.indexOf(id) !== -1; }).length;
+    var need = p.ids.filter(function (id) { return isRequired(id); }).length;
     var all = total > 0 && need === total;
     var part = need > 0 && need < total;
     return '<div class="page-check' + (on ? ' on' : '') + '">' +
@@ -271,6 +334,17 @@
       '</div>';
   }
 
+  /* 组"算勾上了"的条件：组里每一页都在本次勾选里。
+     组状态不单独存一份，页面勾选是唯一事实，组只是它上面的一个快捷开关。 */
+  function activeGroups() {
+    var sel = loadSelected();
+    return window.Library.groups().filter(function (g) {
+      return g.pageIds.length && g.pageIds.every(function (pid) {
+        return sel.ids.indexOf(pid) !== -1;
+      });
+    });
+  }
+
   function renderPageChecks() {
     var box = $('#page-checks');
     if (!box) return;
@@ -280,11 +354,29 @@
       box.innerHTML = '<p class="tiny muted">还没有页面。点右上角「指标与页面」新建一个。</p>';
       return;
     }
+    var groups = window.Library.groups();
+    var html = '';
+
+    // 页面组的快捷开关：勾上 = 组里这些页面一起勾上，顺带把组的必填预设并进来
+    if (groups.length) {
+      html += '<div class="pc-groups">' + groups.map(function (g) {
+        var onCount = g.pageIds.filter(function (pid) { return sel.ids.indexOf(pid) !== -1; }).length;
+        var all = g.pageIds.length > 0 && onCount === g.pageIds.length;
+        var part = onCount > 0 && !all;
+        return '<label class="pc-grp' + (all ? ' on' : '') + (part ? ' part' : '') + '"' +
+          ' title="勾上 = 把这一组里的 ' + g.pageIds.length + ' 个页面一起勾上' +
+            (g.reqIds.length ? '，并带上 ' + g.reqIds.length + ' 项必填预设' : '') + '">' +
+          '<input type="checkbox" class="grp-use" value="' + esc(g.id) + '"' +
+            (all ? ' checked' : '') + (part ? ' data-part="1"' : '') + '>' +
+          '<span class="grp-name">' + esc(g.name) + '</span>' +
+          '<b>' + onCount + '/' + g.pageIds.length + '</b>' +
+          '</label>';
+      }).join('') + '</div>';
+    }
+
     // 常规 / 特殊 分开列：常规是每个病人都做的，特殊是这个病种才做的专项检查。
-    // 以后做"页面组"时，组就是这两堆页面的组合。
     var common = pages.filter(function (p) { return p.kind !== 'special'; });
     var special = pages.filter(function (p) { return p.kind === 'special'; });
-    var html = '';
     if (common.length) {
       html += '<div class="pc-group">常规页面<span class="pc-group-note">每个病人都会做</span></div>';
       html += common.map(function (p) { return pageRowHtml(p, sel); }).join('');
@@ -293,9 +385,19 @@
       html += '<div class="pc-group">特殊页面<span class="pc-group-note">病种专项，按需勾选</span></div>';
       html += special.map(function (p) { return pageRowHtml(p, sel); }).join('');
     }
+    // 不属于任何组的页面单独列出来，免得"建了却看不见"
+    var inGroup = {};
+    groups.forEach(function (g) { g.pageIds.forEach(function (pid) { inGroup[pid] = 1; }); });
+    var loose = pages.filter(function (p) { return p.kind !== 'special' && !inGroup[p.id]; });
+    if (loose.length) {
+      html += '<div class="pc-group">未分组</div>';
+      html += loose.map(function (p) { return pageRowHtml(p, sel); }).join('');
+    }
+
     box.innerHTML = html;
     // 半选的勾要用 DOM 属性设，不能写在 HTML 里
     box.querySelectorAll('.pc-must[data-part]').forEach(function (el) { el.indeterminate = true; });
+    box.querySelectorAll('.grp-use[data-part]').forEach(function (el) { el.indeterminate = true; });
   }
 
   function assetsOf(pid) {
@@ -1402,6 +1504,7 @@
   var libForm = null;   // {kind:'ind'|'page', mode:'new'|'edit', id:'...'}
 
   function libChangeDone(msg) {
+    invalidateReq();          // 组预设、指标、页面都可能刚被改过，必填要重算
     renderAll();
     if (msg) toast(msg, 'ok');
   }
@@ -1460,6 +1563,72 @@
     '</div>';
   }
 
+  /* ---------------- 页面组 ---------------- */
+
+  function groupRows() {
+    var groups = window.Library.groups();
+    if (!groups.length) {
+      return '<tr><td colspan="5" class="tiny muted">还没有组。点右上角「新建组」，把常用的几页打成一包。</td></tr>';
+    }
+    return groups.map(function (g) {
+      var names = g.pageIds.map(function (pid) {
+        var p = window.Library.pageById(pid);
+        return p ? p.name : '';
+      }).filter(Boolean);
+      return '<tr>' +
+        '<td>' + esc(g.name) + '</td>' +
+        '<td class="mono">' + g.pageIds.length + '</td>' +
+        '<td class="mono">' + (g.reqIds.length ? g.reqIds.length : '—') + '</td>' +
+        '<td class="tiny muted">' + esc(names.slice(0, 6).join('、')) + (names.length > 6 ? ' …' : '') + '</td>' +
+        '<td class="row-act">' +
+          '<button class="link" data-act="grp-edit" data-id="' + esc(g.id) + '">编辑</button>' +
+          '<button class="link danger" data-act="grp-del" data-id="' + esc(g.id) + '">删除</button>' +
+        '</td></tr>';
+    }).join('');
+  }
+
+  function groupForm() {
+    var isEdit = libForm && libForm.mode === 'edit';
+    var g = isEdit ? window.Library.groupById(libForm.id) : null;
+    if (isEdit && !g) { libForm = null; return ''; }
+    var pickedPages = g ? g.pageIds : [];
+    var pickedReq = g ? g.reqIds : [];
+
+    var pageList = window.Library.pages().map(function (p) {
+      var on = pickedPages.indexOf(p.id) !== -1;
+      return '<label class="pick' + (on ? ' on' : '') + '">' +
+        '<input type="checkbox" class="g-page" value="' + esc(p.id) + '"' + (on ? ' checked' : '') + '>' +
+        '<span>' + esc(p.name) + '</span>' +
+        '<span class="tiny muted">' + p.ids.length + ' 项</span>' +
+        '</label>';
+    }).join('');
+
+    var reqList = window.Library.indicators().map(function (i) {
+      var on = pickedReq.indexOf(i.id) !== -1;
+      return '<label class="pick' + (on ? ' on' : '') + '">' +
+        '<input type="checkbox" class="g-req" value="' + esc(i.id) + '"' + (on ? ' checked' : '') + '>' +
+        '<span class="mono">' + esc(i.id) + '</span>' +
+        '<span>' + esc(i.name) + '</span>' +
+        '</label>';
+    }).join('');
+
+    return '<div class="lib-form">' +
+      '<div class="form-grid">' +
+        '<label class="span2">组名<input id="g-name" value="' + esc(g ? g.name : '') + '" placeholder="淋巴瘤专项检查"></label>' +
+      '</div>' +
+      '<p class="note">勾选这个组时，下面这些页面会一起被勾上。同一个页面可以同时属于多个组。</p>' +
+      '<input id="g-page-search" class="pick-search" placeholder="筛选页面…">' +
+      '<div id="g-pages" class="pick-list short">' + pageList + '</div>' +
+      '<p class="note">这一组里哪些指标算"缺了要标红"。可以留空——留空就只勾页面、不设必填。</p>' +
+      '<input id="g-req-search" class="pick-search" placeholder="筛选指标…">' +
+      '<div id="g-reqs" class="pick-list short">' + reqList + '</div>' +
+      '<div class="form-act">' +
+        '<button class="btn tiny primary" data-act="grp-save">保存</button>' +
+        '<button class="btn tiny ghost" data-act="grp-cancel">取消</button>' +
+      '</div>' +
+    '</div>';
+  }
+
   function pageRows() {
     return window.Library.pages().map(function (p) {
       return '<tr>' +
@@ -1513,11 +1682,12 @@
       '<div class="tabs">' +
         '<button class="tab' + (libTab === 'ind' ? ' active' : '') + '" data-tab="ind">指标库 <b>' + inds.length + '</b></button>' +
         '<button class="tab' + (libTab === 'page' ? ' active' : '') + '" data-tab="page">页面 <b>' + pages.length + '</b></button>' +
+        '<button class="tab' + (libTab === 'grp' ? ' active' : '') + '" data-tab="grp">页面组 <b>' + window.Library.groups().length + '</b></button>' +
         '<div class="tabs-right">' +
           '<button class="link tiny" data-act="lib-export">导出配置</button>' +
           '<button class="link tiny" data-act="lib-import">导入配置</button>' +
-          '<button class="btn tiny primary" data-act="' + (libTab === 'ind' ? 'ind-new' : 'page-new') + '">+ ' +
-            (libTab === 'ind' ? '新建指标' : '新建页面') + '</button>' +
+          '<button class="btn tiny primary" data-act="' + (libTab === 'ind' ? 'ind-new' : libTab === 'page' ? 'page-new' : 'grp-new') + '">+ ' +
+            (libTab === 'ind' ? '新建指标' : libTab === 'page' ? '新建页面' : '新建组') + '</button>' +
         '</div>' +
       '</div>';
 
@@ -1528,6 +1698,13 @@
           '<table class="mini-grid"><thead><tr>' +
             '<th class="req-head" title="打勾的项，这次没录到就会标红">必填</th><th>代号</th><th>名称</th><th>单位</th><th>参考范围</th><th>同义词</th><th></th>' +
           '</tr></thead><tbody id="ind-rows">' + indicatorRows('') + '</tbody></table>' +
+        '</div>';
+    } else if (libTab === 'grp') {
+      html += (libForm && libForm.kind === 'grp' ? groupForm() : '') +
+        '<div class="pane-scroll">' +
+          '<table class="mini-grid"><thead><tr>' +
+            '<th>组名</th><th>页面数</th><th>必填预设</th><th>包含</th><th></th>' +
+          '</tr></thead><tbody>' + groupRows() + '</tbody></table>' +
         '</div>';
     } else {
       html += (libForm && libForm.kind === 'page' ? pageForm() : '') +
@@ -1565,6 +1742,25 @@
         cb.closest('.pick').classList.toggle('on', cb.checked);
       });
     });
+
+    // 页面组表单里的两个筛选框与勾选高亮
+    [['#g-page-search', '#g-pages'], ['#g-req-search', '#g-reqs']].forEach(function (pair) {
+      var box2 = $(pair[0]);
+      var list = $(pair[1]);
+      if (box2 && list) {
+        box2.addEventListener('input', function () {
+          var q = box2.value.trim().toLowerCase();
+          $$(pair[1] + ' .pick').forEach(function (el) {
+            el.hidden = !!(q && el.textContent.toLowerCase().indexOf(q) === -1);
+          });
+        });
+      }
+    });
+    $$('#g-pages .pick input, #g-reqs .pick input').forEach(function (cb) {
+      cb.addEventListener('change', function () {
+        cb.closest('.pick').classList.toggle('on', cb.checked);
+      });
+    });
   }
 
   function openLibrary(tab) {
@@ -1593,13 +1789,8 @@
 
     try {
       if (act === 'ind-req') {
-        var cur = loadSelected();
         var rid = btn.value;
-        var on = btn.checked;
-        selected = { ids: cur.ids.slice(), reqIds: cur.reqIds.slice() };
-        var at = selected.reqIds.indexOf(rid);
-        if (on && at === -1) selected.reqIds.push(rid);
-        if (!on && at !== -1) selected.reqIds.splice(at, 1);
+        setReq(rid, btn.checked);
         saveSelected();
         renderPageChecks();          // 侧栏那个"必填"勾的整页/半选状态跟着变
         renderStats();
@@ -1653,6 +1844,31 @@
         var sel1 = loadSelected();
         sel1.ids = sel1.ids.filter(function (x) { return x !== id; });
         saveSelected();
+        libChangeDone('已删除');
+        renderLibrary();
+      }
+      else if (act === 'grp-new') { libForm = { kind: 'grp', mode: 'new' }; renderLibrary(); }
+      else if (act === 'grp-edit') { libForm = { kind: 'grp', mode: 'edit', id: id }; renderLibrary(); }
+      else if (act === 'grp-cancel') { libForm = null; renderLibrary(); }
+      else if (act === 'grp-save') {
+        var gp = $$('#g-pages input:checked').map(function (cb) { return cb.value; });
+        var gr = $$('#g-reqs input:checked').map(function (cb) { return cb.value; });
+        var gpayload = { name: $('#g-name').value, pageIds: gp, reqIds: gr };
+        if (libForm.mode === 'edit') {
+          gpayload.id = libForm.id;
+          var oldGroup = window.Library.groupById(libForm.id);
+          gpayload.reqIds = gr;
+          window.Library.updateGroup(gpayload);
+        } else {
+          window.Library.addGroup(gpayload);
+        }
+        libChangeDone('页面组已保存');
+        libForm = null;
+        renderLibrary();
+      }
+      else if (act === 'grp-del') {
+        if (!confirm('删除这个组？页面和指标都不会被删除，只是这个快捷开关没了。')) return;
+        window.Library.removeGroup(id);
         libChangeDone('已删除');
         renderLibrary();
       }
@@ -1764,18 +1980,20 @@
    * 发给另一所，对方导入即可用同一套要求。 */
   function exportLibrary() {
     var cfg = {
-      app: 'jiaowolu', kind: 'library', version: 1,
+      app: 'jiaowolu', kind: 'library', version: 2,
       exportedAt: new Date().toISOString(),
       indicators: window.Library.indicators(),
-      pages: window.Library.pages()
+      pages: window.Library.pages(),
+      groups: window.Library.groups()
     };
     saveText('交我录-指标与页面-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(cfg, null, 2));
-    toast('已导出 ' + cfg.indicators.length + ' 个指标、' + cfg.pages.length + ' 个页面');
+    toast('已导出 ' + cfg.indicators.length + ' 个指标、' + cfg.pages.length + ' 个页面、' + cfg.groups.length + ' 个页面组');
   }
 
   function applyLibrary(cfg) {
     var L = window.Library;
     // 顺序不能反：页面要用指标代号做校验，所以指标必须先落地
+    L.groups().slice().forEach(function (g) { L.removeGroup(g.id); });
     L.pages().slice().forEach(function (p) { L.removePage(p.id); });
     L.indicators().slice().forEach(function (i) { L.removeIndicator(i.id); });
     (cfg.indicators || []).forEach(function (i) {
@@ -1784,7 +2002,20 @@
         unit: i.unit, ref: i.ref, aliases: i.aliases
       });
     });
-    (cfg.pages || []).forEach(function (p) { L.addPage({ name: p.name, ids: p.ids || [] }); });
+    // 页面导入时 id 会重新生成，组的页面引用要跟着换算，否则组会指向不存在的页面
+    var idMap = {};
+    (cfg.pages || []).forEach(function (p) {
+      var np = L.addPage({ name: p.name, ids: p.ids || [] });
+      idMap[p.id] = np.id;
+    });
+    (cfg.groups || []).forEach(function (g) {
+      if (!g || !g.name) return;
+      var pageIds = (g.pageIds || []).map(function (pid) { return idMap[pid]; }).filter(Boolean);
+      if (!pageIds.length) return;
+      try {
+        L.addGroup({ name: g.name, pageIds: pageIds, reqIds: g.reqIds || [] });
+      } catch (e) { /* 单个组不合法就跳过，不要把整次导入搞挂 */ }
+    });
   }
 
   function importLibrary() {
@@ -1881,29 +2112,52 @@
       if (!cb) return;
       var id = cb.value;
       var cur = loadSelected();
-      selected = { ids: cur.ids.slice(), reqIds: cur.reqIds.slice() };
+      selected = { ids: cur.ids.slice(), add: cur.add.slice(), drop: cur.drop.slice() };
+
+      if (cb.classList.contains('grp-use')) {
+        // 组只是"把页面一次勾上"的快捷方式：必填预设由 requiredIds() 自动派生，
+        // 组勾上就生效、取消就失效，不用在这里做加减账。
+        var g = window.Library.groupById(id);
+        if (!g) return;
+        if (cb.checked) {
+          g.pageIds.forEach(function (pid) {
+            if (selected.ids.indexOf(pid) === -1) selected.ids.push(pid);
+          });
+        } else {
+          // 先记下"还被别的已勾组占着"的页面，避免两组有交集时把另一组也带崩
+          var keep = {};
+          var owner = '';
+          activeGroups().forEach(function (o) {
+            if (o.id === g.id) return;
+            o.pageIds.forEach(function (pid) { keep[pid] = 1; owner = o.name; });
+          });
+          var removable = g.pageIds.filter(function (pid) { return !keep[pid]; });
+          if (!removable.length) {
+            // 整组都被别的组盖住了，取消它其实什么也不会发生——说清楚，别让人以为点了没反应
+            toast('这组的页面已经包含在「' + owner + '」里了，要取消请从那边取消', 'err');
+            renderAll();
+            return;
+          }
+          removable.forEach(function (pid) {
+            var i = selected.ids.indexOf(pid);
+            if (i !== -1) selected.ids.splice(i, 1);
+            forgetReqOfPage(pid);
+          });
+        }
+        saveSelected();
+        renderAll();
+        return;
+      }
 
       if (cb.classList.contains('pc-must')) {
         // 整页批量：勾上就整页必填，取消就整页都不必填（含之前单独标的那几项）
-        var page = window.Library.pageById(id);
-        var ids = page ? page.ids : [];
-        if (cb.checked) {
-          ids.forEach(function (x) {
-            if (selected.reqIds.indexOf(x) === -1 && window.Library.byId(x)) selected.reqIds.push(x);
-          });
-        } else {
-          selected.reqIds = selected.reqIds.filter(function (x) { return ids.indexOf(x) === -1; });
-        }
+        setReqOfPage(id, cb.checked);
       } else {
         var i = selected.ids.indexOf(id);
         if (cb.checked && i === -1) selected.ids.push(id);
         if (!cb.checked && i !== -1) selected.ids.splice(i, 1);
         // 不参与本次的页面，就不该再占着"必填"——否则取消勾选后红点还在，像哑弹
-        if (!cb.checked) {
-          var pid = window.Library.pageById(id);
-          var pids = pid ? pid.ids : [];
-          selected.reqIds = selected.reqIds.filter(function (x) { return pids.indexOf(x) === -1; });
-        }
+        if (!cb.checked) forgetReqOfPage(id);
       }
       saveSelected();
       renderAll();

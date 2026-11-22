@@ -25,9 +25,9 @@
   'use strict';
 
   // v4：按医院真实后台的登记表重建（病案首页 14 项、病毒学/FISH/病理/骨髓流式/增强CT/免疫学/出院小结）
-  var STORE_KEY = 'jiaowolu.library.v4';
-  var PREV_KEY = 'jiaowolu.library.v3';
-  var OLD_KEY = 'jiaowolu.library.v2';
+  var STORE_KEY = 'jiaowolu.library.v5';
+  var PREV_KEY = 'jiaowolu.library.v4';
+  var OLD_KEY = 'jiaowolu.library.v3';
 
   function num(id, name, group, unit, ref, low, high, aliases) {
     return { id: id, name: name, group: group, type: 'num', unit: unit, ref: ref, low: low, high: high, aliases: aliases };
@@ -254,7 +254,22 @@
     { id: 'ct',     kind: 'special', on: false, name: '增强CT报告',   ids: ['CT_RPT', 'CT_TYPE'] }
   ];
 
-  var state = { indicators: [], pages: [] };
+  /* 页面组：把一批页面打成一包，勾组等于"把组里这些页面一起勾上"。
+     组里还可以预设"这一组里哪些指标算必填"——淋巴瘤质控和常规随访要盯的项不一样，
+     但不必每次重建一遍页面。页面可以同时属于多个组。 */
+  var DEFAULT_GROUPS = [
+    {
+      id: 'common', name: '常规页面组', reqIds: [],
+      pageIds: ['course', 'cbc', 'liver', 'renal', 'elec', 'bio', 'discharge']
+    },
+    {
+      id: 'lymphoma', name: '淋巴瘤专项检查', reqIds: [],
+      pageIds: ['course', 'cbc', 'liver', 'renal', 'elec', 'bio', 'discharge',
+        'coag', 'immu', 'infect', 'fish', 'patho', 'flow', 'ct']
+    }
+  ];
+
+  var state = { indicators: [], pages: [], groups: [] };
   var BY_ID = {};
   var ALIAS_INDEX = null;
   var RENAMED = [];   // 指标改代号后要一起改的地方，交给调用方处理
@@ -282,7 +297,7 @@
   }
 
   function load() {
-    var seed = { indicators: clone(DEFAULT_INDICATORS), pages: clone(DEFAULT_PAGES) };
+    var seed = { indicators: clone(DEFAULT_INDICATORS), pages: clone(DEFAULT_PAGES), groups: clone(DEFAULT_GROUPS) };
     var raw = null;
     try { raw = global.localStorage.getItem(STORE_KEY); } catch (e) { /* 隐私模式 */ }
     if (!raw) {
@@ -310,7 +325,7 @@
               p.name = def.name;
               p.kind = def.kind;
             });
-            state = { indicators: old.indicators, pages: old.pages };
+            state = { indicators: old.indicators, pages: old.pages, groups: clone(DEFAULT_GROUPS) };
             rebuild(); save();
             try { global.localStorage.removeItem(PREV_KEY); } catch (e2) { /* ignore */ }
             return;
@@ -326,7 +341,9 @@
       if (!got || !Array.isArray(got.indicators) || !Array.isArray(got.pages)) throw new Error('结构不对');
       // 旧存档里的指标没有 type，补上，否则表格会把文本项当数值渲染
       got.indicators.forEach(function (i) { if (!i.type) i.type = 'num'; });
-      state = { indicators: got.indicators, pages: got.pages };
+      // 上一版没有页面组，补一份默认的；已有的组原样保留
+      var gs = Array.isArray(got.groups) && got.groups.length ? got.groups : clone(DEFAULT_GROUPS);
+      state = { indicators: got.indicators, pages: got.pages, groups: gs };
     } catch (e) {
       // 存档坏了就退回种子，不要让一份坏数据把整个工作台打死
       state = seed;
@@ -343,6 +360,57 @@
   function byId(id) { return BY_ID[id] || null; }
   function pageById(id) {
     return state.pages.filter(function (p) { return p.id === id; })[0] || null;
+  }
+
+  /* ---------------- 页面组 ---------------- */
+
+  function groups() { return state.groups.slice(); }
+
+  function groupById(id) {
+    return state.groups.filter(function (g) { return g.id === id; })[0] || null;
+  }
+
+  // 组里引用的页面或指标可能已经被删了，校验时顺手剔掉，别把脏引用带进存档
+  function cleanGroup(raw) {
+    var src = raw || {};
+    var name = String(src.name || '').trim();
+    if (!name) throw new Error('组名不能为空');
+    var pageIds = [];
+    (src.pageIds || []).forEach(function (pid) {
+      if (pageById(pid) && pageIds.indexOf(pid) === -1) pageIds.push(pid);
+    });
+    if (!pageIds.length) throw new Error('至少选一个页面');
+    var reqIds = [];
+    (src.reqIds || []).forEach(function (id) {
+      if (BY_ID[id] && reqIds.indexOf(id) === -1) reqIds.push(id);
+    });
+    return {
+      id: src.id || ('g' + Date.now().toString(36)),
+      name: name,
+      pageIds: pageIds,
+      reqIds: reqIds
+    };
+  }
+
+  function addGroup(raw) {
+    var g = cleanGroup(raw);
+    state.groups.push(g);
+    save();
+    return g;
+  }
+
+  function updateGroup(raw) {
+    var g = cleanGroup(raw);
+    var i = state.groups.map(function (x) { return x.id; }).indexOf(g.id);
+    if (i < 0) throw new Error('这个组不在了');
+    state.groups[i] = g;
+    save();
+    return g;
+  }
+
+  function removeGroup(id) {
+    state.groups = state.groups.filter(function (g) { return g.id !== id; });
+    save();
   }
 
   /* 报告上的项目名常带方法学后缀，如「肌酐（酶法）」「葡萄糖(干化学)」。
@@ -545,7 +613,7 @@
   }
 
   function resetAll() {
-    state = { indicators: clone(DEFAULT_INDICATORS), pages: clone(DEFAULT_PAGES) };
+    state = { indicators: clone(DEFAULT_INDICATORS), pages: clone(DEFAULT_PAGES), groups: clone(DEFAULT_GROUPS) };
     rebuild(); save();
   }
 
@@ -570,6 +638,11 @@
     addPage: addPage,
     updatePage: updatePage,
     removePage: removePage,
+    groups: groups,
+    groupById: groupById,
+    addGroup: addGroup,
+    updateGroup: updateGroup,
+    removeGroup: removeGroup,
     resetAll: resetAll,
     takeRenames: takeRenames,
     parseRange: parseRange
