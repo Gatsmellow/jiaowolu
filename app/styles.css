@@ -281,10 +281,11 @@ body {
   justify-content: space-between;
   gap: 4px;
 }
-.asset-state { font-weight: 600; }
+.asset-state { font-weight: 600; white-space: nowrap; }
 .asset-state.ok { color: var(--green); }
 .asset-state.run { color: var(--blue); }
 .asset-state.err { color: var(--red); }
+.asset-state.stale { color: #a0450f; }
 
 /* ---------- 表格 ---------- */
 .table-wrap {
@@ -1020,3 +1021,21 @@ table.mini-grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .action-detail { grid-column: 1 / -1; }
   .action-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
 }
+/* 规则改过之后的重读提示 */
+.rerun-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid #f0d3b8;
+  border-radius: 8px;
+  background: #fdf6ef;
+  font-size: 13px;
+  color: #7a4310;
+}
+.rerun-hint[hidden] { display: none; }
+.rerun-hint b { font-size: 15px; }
+.rerun-hint .btn { flex: 0 0 auto; }
+.rerun-hint .rerun-note { color: #9a6b3f; font-size: 12px; }

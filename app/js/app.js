@@ -658,7 +658,11 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
       var label = a.kind === 'pdf' ? '报告 ' + a.fileIndex + ' · 第 ' + a.pageNo + ' 页' : '报告 ' + a.fileIndex;
       if (a.docType && a.status === 'done') label += ' · ' + a.docType;
       var st;
-      if (a.status === 'done') st = '<span class="asset-state ok">已识别</span>';
+      if (a.status === 'done') {
+        st = isStale(a)
+          ? '<span class="asset-state stale" title="本批规则改过，这份报告是按旧规则读的">需重读</span>'
+          : '<span class="asset-state ok">已识别</span>';
+      }
       else if (a.status === 'running') st = '<span class="asset-state run">识别中</span>';
       else if (a.status === 'skipped') st = '<span class="asset-state" title="长边不到 900 像素，没送去识别">已跳过</span>';
       else if (a.status === 'error') {
@@ -826,6 +830,7 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
 
   function renderTable() {
     renderActionQueue();
+    renderRerunHint();
     var body = $('#grid-body');
     var p = current();
     if (!p) return;
@@ -1239,6 +1244,37 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
   /* 这类文书上应该出现哪些指标 = 它对应的页面 + 页眉字段，再和"本次要看"取交集。
    * 出院小结是例外：它的正文里常把当天的化验结果又写一遍，
    * 那些值是对应化验单没上传时的备用来源，所以候选开放成"本次所有页面"。 */
+  /* 这份报告是不是"规则改过之后没重新读过"。
+   * 判据：它当初是按 sentIds 那批指标问的，而现在按同样类型算出来的候选里
+   * 出现了当初没问过的指标 —— 说明本批页面组换了，旧的抽取结果不完整。
+   * sentIds 只有在本次版本识别过的报告上才有，老会话不误报。 */
+  function isStale(asset) {
+    if (!asset || asset.status !== 'done' || !Array.isArray(asset.sentIds)) return false;
+    var now = candidatesFor(asset.docType || asset.reportType || '其他');
+    for (var i = 0; i < now.length; i++) {
+      if (asset.sentIds.indexOf(now[i]) === -1) return true;
+    }
+    return false;
+  }
+
+  function staleAssets(pid) {
+    return assetsOf(pid).filter(isStale);
+  }
+
+  /* 顶部提示：规则改过之后，明确告诉用户"这几份要重读"，别让他自己猜为什么全灰 */
+  function renderRerunHint() {
+    var box = $('#rerun-hint');
+    if (!box) return;
+    var p = current();
+    var list = (p && !S.running) ? staleAssets(p.id) : [];
+    if (!list.length) { box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    box.innerHTML = '<span>本批规则改过了，还有 <b>' + list.length + '</b> 份报告是按旧规则读的，' +
+      '这些页里新加的指标现在显示为「未提供」。</span>' +
+      '<button type="button" class="btn primary" id="btn-rerun-stale">重新识别这 ' + list.length + ' 份</button>' +
+      '<span class="rerun-note">会覆盖这几份报告之前的识别结果</span>';
+  }
+
   function candidatesFor(type) {
     /* 页眉/身份字段（姓名、性别、年龄、住院号、就诊日期、医院）只从"病案首页"取。
      * 为什么：同一个患者每一份化验单的页眉都会重复印一遍，让模型到处抄只会
@@ -1450,6 +1486,9 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
     asset.reportType = data.report_type || cls.type;
     asset.reportDate = data.report_date || '';
     asset.unmatched = unmatched;
+    // 记住这次是按哪一批指标问的。以后本批规则改了（换了页面组），
+    // 就能据此判断"这份报告得重新识别一次"，而不是让人自己猜。
+    asset.sentIds = ids.slice();
     return { added: added, unmatched: unmatched, ms: res ? res.ms : 0, usage: res ? res.usage : null, type: cls.type };
   }
 
@@ -1500,7 +1539,13 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
     }
     if (S.running || !S.patients.includes(p) || importing.has(p.id)) return;
 
-    var todo = assetsOf(p.id).filter(function (a) { return a.status === 'pending' || a.status === 'error'; });
+    var todo = assetsOf(p.id).filter(function (a) {
+      return a.status === 'pending' || a.status === 'error' || isStale(a);
+    });
+    var staleCount = todo.filter(isStale).length;
+    if (staleCount) {
+      toast('有 ' + staleCount + ' 份报告是按旧规则读的，这次会重新识别（覆盖它们之前的识别结果）。', 'err');
+    }
 
     // 长边不到 900 像素的图不送去识别。实测这种图不会"读得差一点"，
     // 而是要么卡很久最后返回空，要么读成相邻的、看着很像的数字——
@@ -2847,6 +2892,10 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
       if (retry) { retryOne(reportAsset(retry.dataset.retry)); return; }
       var a = e.target.closest('[data-aid]');
       if (a) openSource(a.dataset.aid);
+    });
+
+    $('#rerun-hint').addEventListener('click', function (e) {
+      if (e.target.closest('#btn-rerun-stale')) runRecognize();
     });
 
     $('#btn-run').addEventListener('click', runRecognize);
