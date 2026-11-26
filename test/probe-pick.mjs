@@ -148,27 +148,31 @@ async function main() {
       })()`);
     check(injected.wbc === 3, '注入后 WBC 共 ' + injected.wbc + ' 条（当日 2 条 + 历史 1 条）');
 
-    console.log('[3/4] 打开冲突对照，数一下“以此为准”按钮');
+    console.log('[3/4] 打开来源（新版在右侧检查器里），数一下“以此为准”');
     const cmp = await cdp.eval(`
       (function () {
-        document.querySelector('tr[data-ind="WBC"] .conflict-src, tr[data-ind="WBC"] [data-cmp]').click();
-        var rows = Array.from(document.querySelectorAll('.cmp-table tbody tr'));
+        var link = document.querySelector('tr[data-ind="WBC"] .src-link');
+        if (link) link.click();
+        var choices = Array.from(document.querySelectorAll('.source-choice'));
         return {
-          rows: rows.length,
-          picks: document.querySelectorAll('.cmp-table [data-pick]').length,
-          title: (document.querySelector('#modal-box h3') || {}).textContent || ''
+          rows: choices.length,
+          texts: choices.map(function (b) { return b.textContent.replace(/\\s+/g, ' ').trim(); }),
+          picks: document.querySelectorAll('.inspector [data-pick]').length
         };
       })()`);
-    check(/同一次就诊里对不上/.test(cmp.title), '弹层标题是"同一次就诊里对不上"，实际：' + cmp.title.trim());
-    check(cmp.rows === 2, '对照表只列同一天那 2 条来源（实际 ' + cmp.rows + '）');
-    check(cmp.picks === 2, '只有同一天的 2 条带“以此为准”，跨日期那条没有（实际 ' + cmp.picks + '）');
+    check(cmp.rows === 2, '来源只列同一天那 2 条（实际 ' + cmp.rows + '）');
+    check(cmp.texts.join(' ').indexOf('3.21') === -1, '跨日期那条 3.21 不在当天的来源里：' + JSON.stringify(cmp.texts));
+    check(cmp.picks === 1, '当前选中的那条带一个“以此为准”（实际 ' + cmp.picks + '）');
 
-    console.log('[4/4] 裁决 9.99，看历史记录还在不在');
+    console.log('[4/4] 选 9.99 并以此为准，看历史记录还在不在');
     const after = await cdp.eval(`
       (function () {
-        var btn = Array.from(document.querySelectorAll('.cmp-table [data-pick]'))
-          .filter(function (b) { return b.getAttribute('data-pick') === 'obs-dup'; })[0];
-        btn.click();
+        // 先在检查器里选中"9.99 那条"，再点"以此为准"
+        var pick = Array.from(document.querySelectorAll('.source-choice'))
+          .filter(function (b) { return b.textContent.indexOf('9.99') !== -1; })[0];
+        if (pick) pick.click();
+        var btn = document.querySelector('.inspector [data-pick]');
+        if (btn) btn.click();
         var S = window.__S;
         var left = S.observations.filter(function (o) { return o.indicatorId === 'WBC'; });
         var tr = document.querySelector('tr[data-ind="WBC"]');
@@ -177,9 +181,11 @@ async function main() {
           dates: left.map(function (o) { return o.date; }).sort(),
           values: left.map(function (o) { return o.value; }).sort(),
           cls: tr ? tr.className : 'missing',
-          shown: tr ? tr.querySelector('.val-input').value : ''
+          shown: tr ? tr.querySelector('.val-input').value : '',
+          picked: !!btn
         };
       })()`);
+    check(after.picked, '检查器里有可点的“以此为准”');
     check(after.n === 2, '裁决后 WBC 剩 ' + after.n + ' 条（应为 2：保留裁决值 + 历史值）');
     check(after.dates.indexOf('2026-08-20') >= 0, '历史就诊日 2026-08-20 仍在：' + JSON.stringify(after.dates));
     check(after.values.indexOf('3.21') >= 0, '历史值 3.21 没被删掉：' + JSON.stringify(after.values));
@@ -195,13 +201,15 @@ async function main() {
         if (!hint) return { err: '没有时间轴提示按钮' };
         hint.click();
         return {
-          title: (document.querySelector('#modal-box h3') || {}).textContent || '',
-          rows: document.querySelectorAll('.cmp-table tbody tr').length,
-          picks: document.querySelectorAll('.cmp-table [data-pick]').length
+          rows: document.querySelectorAll('.source-choice').length,
+          texts: Array.from(document.querySelectorAll('.source-choice')).map(function (b) { return b.textContent.replace(/\\s+/g, ' ').trim(); }),
+          picks: document.querySelectorAll('.inspector [data-pick]').length
         };
       })()`);
+    check(!span.err, '有时间轴提示按钮' + (span.err ? '：' + span.err : ''));
     check(span.picks === 0, '跨日期对照里“以此为准”按钮数 = ' + span.picks + '（应为 0）');
-    check(/各次就诊的值/.test(span.title || ''), '弹层标题是“各次就诊的值”，实际：' + String(span.title || '').trim());
+    check((span.texts || []).join(' ').indexOf('3.21') !== -1 && (span.texts || []).join(' ').indexOf('9.99') !== -1,
+      '跨日期对照把两次的值都列出来了：' + JSON.stringify(span.texts || []));
   } finally {
     chrome.kill();
     await sleep(400);

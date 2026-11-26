@@ -188,18 +188,21 @@ async function main() {
     writeFileSync(join(ROOT, 'docs', 'figs', 'ui-conflict-row.png'), Buffer.from(shot.data, 'base64'));
     console.log('    截图：docs/figs/ui-conflict-row.png');
 
-    console.log('[4/5] 点开"两处不一致"看对比');
-    await cdp.eval('document.querySelector(\'[data-cmp="WBC"]\').click(); "clicked"');
-    await sleep(500);
+    console.log('[4/5] 点开来源看对比（新版对比落在右侧检查器里）');
     const cmp = await cdp.eval(`
       (function () {
-        var t = document.querySelector('.cmp-table');
-        if (!t) return null;
-        return Array.from(t.querySelectorAll('tbody tr')).map(tr =>
-          Array.from(tr.querySelectorAll('td')).slice(0, 3).map(td => td.textContent.trim()).join(' | '));
+        var tr = document.querySelector('tr.conflict[data-ind="WBC"]');
+        var link = tr.querySelector('.src-link');
+        if (link) link.click();
+        var choices = Array.from(document.querySelectorAll('.source-choice'));
+        return {
+          n: choices.length,
+          texts: choices.map(function (b) { return b.textContent.replace(/\\s+/g, ' ').trim(); }),
+          picks: document.querySelectorAll('.inspector [data-pick]').length
+        };
       })()
     `);
-    console.log('    对比表：' + JSON.stringify(cmp));
+    console.log('    来源选项：' + JSON.stringify(cmp.texts));
     shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(join(ROOT, 'docs', 'figs', 'ui-conflict-compare.png'), Buffer.from(shot.data, 'base64'));
     console.log('    截图：docs/figs/ui-conflict-compare.png');
@@ -207,8 +210,9 @@ async function main() {
     console.log('[5/5] 检查页面异常');
     console.log('    ' + (cdp.errors.length ? String(cdp.errors[0]).split('\n')[0] : '无'));
 
-    const ok = row && (row.src.indexOf('/') !== -1 || row.src.indexOf('个来源') !== -1)
-      && Array.isArray(cmp) && cmp.length === 2;
+    const bothValues = cmp.texts.length === 2 &&
+      cmp.texts.join(' ').indexOf('7.24') !== -1 && cmp.texts.join(' ').indexOf('9.99') !== -1;
+    const ok = !!(row && (row.src.indexOf('/') !== -1 || row.src.indexOf('个来源') !== -1)) && bothValues;
     if (!ok) {
       console.error('\n不通过：冲突没有把两个来源都列出来');
       process.exitCode = 1;
