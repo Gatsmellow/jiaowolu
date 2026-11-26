@@ -72,7 +72,7 @@ try {
   await send('Runtime.enable');
   await send('Page.navigate', { url: APP });
   await sleep(2500);
-  await ev(`localStorage.setItem('jiaowolu.apiKey', ${JSON.stringify(KEY)});
+  await ev(`localStorage.setItem('jiaowolu.startView','all');localStorage.setItem('jiaowolu.apiKey', ${JSON.stringify(KEY)});
     localStorage.setItem('jiaowolu.modelConfig', JSON.stringify({ base:'https://api.deepseek.com', model:'deepseek-flash' }));
     location.reload(); 'ok'`);
   await sleep(3000);

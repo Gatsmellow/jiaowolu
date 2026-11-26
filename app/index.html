@@ -22,83 +22,127 @@
   </div>
 </header>
 
-<main class="layout">
-  <aside class="side">
-    <section class="side-block">
-      <label class="side-label">
-        本次需要
-        <button id="btn-library" class="link tiny">指标与页面</button>
-      </label>
-      <div id="page-checks" class="page-checks"></div>
-    </section>
+<div class="batch-toolbar" role="group" aria-label="批次规则与导出">
+  <button id="btn-rules" class="btn rule-button" type="button" aria-haspopup="dialog">
+    <span class="toolbar-label">本批规则</span>
+    <strong id="rule-label">常规页面组</strong>
+    <span id="rule-summary" class="toolbar-detail"></span>
+    <span aria-hidden="true">⌄</span>
+  </button>
+  <div class="export-actions" role="group" aria-label="导出结果">
+    <span id="export-scope" class="toolbar-detail" aria-live="polite"></span>
+    <button id="btn-export" class="btn" type="button">导出 CSV</button>
+    <button id="btn-export-json" class="btn" type="button">导出 JSON</button>
+    <details class="export-options">
+      <summary aria-label="导出选项" title="导出选项">⋯</summary>
+      <label><input type="checkbox" id="chk-hide-ident" checked> 导出时隐藏身份信息</label>
+    </details>
+  </div>
+</div>
 
-    <section class="side-block">
-      <label class="side-label">质控概览</label>
-      <div id="stats" class="stats"></div>
-    </section>
-
-    <section class="side-block grow">
-      <label class="side-label">患者批次</label>
-      <div id="patient-list" class="patient-list"></div>
-      <button id="btn-add-patient" class="btn tiny ghost wide">+ 添加患者</button>
-    </section>
-
-    <section class="side-block actions">
-      <button id="btn-run" class="btn primary wide">开始识别</button>
-      <button id="btn-export" class="btn ghost wide">导出 CSV</button>
-      <button id="btn-export-json" class="btn ghost wide">导出 JSON</button>
-      <label class="side-tiny" title="身份证、电话、地址只留在本机；导出时默认抹成（已隐藏）">
-        <input type="checkbox" id="chk-hide-ident" checked> 导出时隐藏身份信息
-      </label>
-      <button id="btn-reset" class="btn ghost wide danger">清空本次任务</button>
-      <p class="hint">报告只在你自己的浏览器里解析。点"开始识别"时，页面图片会发送到你配置的模型服务，不经过我们的服务器。</p>
-    </section>
+<main id="workbench" class="layout">
+  <aside class="side" aria-labelledby="queue-title">
+    <div class="queue-head">
+      <h2 id="queue-title">本批患者</h2>
+      <span id="queue-count" class="toolbar-detail"></span>
+    </div>
+    <button id="btn-all-patients" type="button" class="queue-all" aria-pressed="false">全部患者</button>
+    <div id="patient-list" class="patient-list"></div>
+    <div class="queue-actions">
+      <button id="btn-add-patient" class="btn ghost wide" type="button">+ 添加患者</button>
+      <button id="btn-reset" class="link danger" type="button">清空本次任务</button>
+    </div>
   </aside>
 
-  <section class="work">
+  <section id="work" class="work" aria-labelledby="patient-title">
     <div class="work-head">
       <div>
-        <h2 id="patient-title">尚无患者</h2>
-        <p id="patient-sub" class="muted">先添加一位患者，再上传其名下的报告</p>
+        <h2 id="patient-title">全部患者</h2>
+        <p id="patient-sub" class="muted"></p>
       </div>
-      <div class="work-actions">
-        <label class="btn primary file-btn">
-          上传报告
-          <input id="file-input" type="file" multiple accept="image/*,application/pdf" hidden>
-        </label>
+      <div id="work-actions" class="work-actions" hidden>
+        <button id="btn-upload" class="btn" type="button">上传报告</button>
+        <input id="file-input" type="file" multiple accept="image/*,application/pdf" hidden>
+        <button id="btn-run" class="btn primary" type="button" hidden>开始识别</button>
       </div>
     </div>
 
-    <div id="dropzone" class="dropzone">
-      <input id="drop-input" type="file" multiple accept="image/*,application/pdf" hidden>
-      <p id="dz-title" class="dz-title">把报告图片或 PDF 拖到这里</p>
-      <p class="dz-sub">支持 JPG / PNG / PDF；一位患者的报告一次传完，不必按检查类别排序</p>
-      <button id="dz-pick" class="btn tiny ghost">选择文件</button>
-    </div>
+    <div id="batch-overview" hidden></div>
+    <div id="patient-work" hidden>
+      <div id="dropzone" class="dropzone">
+        <div class="upload-icon" aria-hidden="true">↑</div>
+        <input id="drop-input" type="file" multiple accept="image/*,application/pdf" hidden>
+        <p class="dz-title">导入这位患者的报告</p>
+        <p class="dz-sub">拖放文件到这里，支持图片和 PDF</p>
+        <button id="dz-pick" class="btn primary" type="button">选择文件</button>
+      </div>
 
-    <div id="asset-strip" class="asset-strip"></div>
+      <p id="recognition-status" class="work-status" role="status" hidden></p>
+      <details id="report-list" class="report-list" hidden>
+        <summary id="report-summary">报告</summary>
+        <div id="asset-strip" class="asset-strip"></div>
+      </details>
+      <p id="recognition-note" class="work-note" hidden>开始识别会将这位患者的报告页发送到已配置的模型服务。</p>
 
-    <div id="date-bar" class="date-bar" hidden></div>
-
-    <div class="table-wrap">
-      <table class="grid">
-        <thead>
-          <tr>
-            <th class="col-name">指标</th>
-            <th class="col-value">结果</th>
-            <th class="col-unit">单位</th>
-            <th class="col-ref">参考范围</th>
-            <th class="col-src">来源</th>
-          </tr>
-        </thead>
-        <tbody id="grid-body"></tbody>
-      </table>
+      <section id="results" class="results" aria-label="识别结果" hidden>
+        <div class="results-head">
+          <div class="result-switch" role="group" aria-label="结果范围">
+            <button id="btn-review" type="button" aria-pressed="true">待核对</button>
+            <button id="btn-results-all" type="button" aria-pressed="false">全部结果</button>
+          </div>
+          <div id="stats" class="stats" aria-label="待核对概览"></div>
+        </div>
+        <div id="date-bar" class="date-bar" hidden></div>
+        <div id="results-empty" class="stage-empty" role="status" hidden></div>
+        <div id="results-table" class="table-wrap">
+          <table class="grid">
+            <thead>
+              <tr>
+                <th class="col-name" scope="col">指标</th>
+                <th class="col-value" scope="col">结果</th>
+                <th class="col-unit" scope="col">单位</th>
+                <th class="col-ref" scope="col">参考范围</th>
+                <th class="col-src" scope="col">状态与来源</th>
+              </tr>
+            </thead>
+            <tbody id="grid-body"></tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </section>
+  <aside id="inspector" class="inspector" aria-label="核对详情" hidden></aside>
 </main>
 
+<dialog id="rules-dialog" class="workbench-dialog" aria-labelledby="rules-title">
+  <div class="dialog-heading">
+    <h2 id="rules-title">本批质控规则</h2>
+    <button type="button" class="btn" data-close-dialog aria-label="关闭规则">×</button>
+  </div>
+  <p class="muted">规则应用于本批所有患者。已识别报告可在报告详情中重新识别。</p>
+  <div class="rule-picker">
+    <label for="rule-preset">套用页面组</label>
+    <select id="rule-preset" class="select"></select>
+    <button id="btn-apply-rule" class="btn" type="button" disabled>套用</button>
+  </div>
+  <div id="page-checks" class="page-checks"></div>
+  <div class="dialog-actions">
+    <button id="btn-library" class="link" type="button">管理指标与页面</button>
+    <button type="button" class="btn primary" data-close-dialog>完成</button>
+  </div>
+</dialog>
+
+<dialog id="export-dialog" class="workbench-dialog export-dialog" aria-labelledby="export-title" aria-describedby="export-message">
+  <h2 id="export-title">仍有待核对项</h2>
+  <p id="export-message"></p>
+  <div class="dialog-actions">
+    <button type="button" class="btn" data-close-dialog>返回核对</button>
+    <button id="btn-confirm-export" type="button" class="btn primary">仍然导出</button>
+  </div>
+</dialog>
+
 <div id="modal" class="modal" hidden>
-  <div id="modal-box" class="modal-box"></div>
+  <div id="modal-box" class="modal-box" role="dialog" aria-modal="true" aria-label="工作台设置"></div>
 </div>
 
 <div id="offline-bar" class="offline-bar" hidden>

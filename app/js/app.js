@@ -17,7 +17,6 @@
   var PDF_MAX_PAGES = 12;      // 一次最多拆 12 页
   var CONCURRENCY = 2;         // 同时识别几页
   var LOW_CONFIDENCE = 0.6;
-  var smallCount = 0;          // 本次上传里有多少张低分辨率图
 
   /* 文书类型 → 只有这类文书上才会成组出现的页面。
      先判类型再抽取，是为了不让模型到出院记录的正文里去"捞"血常规——
@@ -47,10 +46,42 @@
     assets: [],
     observations: [],
     running: false,
+    runningPatientId: null,
+    progress: null,
     dateFilter: '',            // 时间轴：只看某一次就诊（'' = 全部，取最近一次的值）
     collapse: {},              // 页面分组是展开还是收起，用户点过就记住
     seq: { patient: 0, asset: 0, obs: 0 }
   };
+  var patientViews = new Map();
+  var importing = new Set();
+
+  // 上次停在哪个视图就还停在哪个（"全部结果"看惯了的人不用每次再点一下）；
+  // 地址栏也可以强制指定：?view=all 直接进"全部结果"，方便把一批的完整表格发成链接。
+  var START_VIEW = (function () {
+    try {
+      if (localStorage.getItem('jiaowolu.startView') === 'all') return 'all';
+    } catch (e) { /* 隐私模式下 localStorage 可能不可用 */ }
+    try {
+      return new URLSearchParams(location.search).get('view') === 'all' ? 'all' : 'review';
+    } catch (e) {
+      return 'review';
+    }
+  })();
+
+  function viewOf(pid) {
+    if (!patientViews.has(pid)) {
+      patientViews.set(pid, {
+        mode: START_VIEW,
+        // 用户自己点过视图切换就不再替他做主；没点过才在识别完成后自动挑一个
+        modeChosen: START_VIEW === 'all',
+        date: '',
+        collapse: {},
+        detail: null,
+        scroll: 0,
+      });
+    }
+    return patientViews.get(pid);
+  }
 
   /* ---------------- 本地缓存：不小心关掉页面也不丢 ----------------
    * 存在 IndexedDB（图片是 dataURL，几 MB，localStorage 装不下）。
@@ -134,7 +165,7 @@
     });
     S.observations = saved.observations || [];
     S.seq = saved.seq || S.seq;
-    S.currentId = S.patients.some(function (p) { return p.id === saved.currentId; })
+    S.currentId = saved.currentId === null || S.patients.some(function (p) { return p.id === saved.currentId; })
       ? saved.currentId
       : (S.patients[0] ? S.patients[0].id : null);
   }
@@ -156,14 +187,13 @@
     if (!box) {
       box = document.createElement('div');
       box.id = 'toast-box';
-      box.style.cssText = 'position:fixed;top:70px;right:20px;z-index:200;display:flex;flex-direction:column;gap:8px;max-width:380px';
+      box.setAttribute('role', 'status');
       document.body.appendChild(box);
     }
     // 只保留最新一条：连点几下按钮时不该糊一屏提示
     while (box.firstChild) box.removeChild(box.firstChild);
     var d = document.createElement('div');
-    var bg = kind === 'err' ? '#c62f2f' : (kind === 'ok' ? '#17864a' : '#22303c');
-    d.style.cssText = 'background:' + bg + ';color:#fff;padding:10px 14px;border-radius:8px;font-size:13px;line-height:1.5;box-shadow:0 6px 20px rgba(0,0,0,.18)';
+    d.className = 'toast' + (kind ? ' ' + kind : '');
     d.textContent = msg;
     box.appendChild(d);
     setTimeout(function () {
@@ -448,7 +478,7 @@
    * 现在的处理：谁能对上指标就用谁的值，来源列写清楚是哪份报告、哪一天；
    * 只有"该有却没有"（必填缺失）才是红的。 */
 
-  function cellState(pid, indId) {
+  function cellState(pid, indId, dateFilter = pid === S.currentId ? S.dateFilter : '') {
     var list = obsOf(pid, indId);
     var ind = window.Library.byId(indId);
     var isNum = !ind || (ind.type || 'num') === 'num';
@@ -457,9 +487,10 @@
     // 取置信度最高的那条。不然自己跟自己都会"两处不一致"。
     var byAsset = {};
     list.forEach(function (o) {
-      var cur = byAsset[o.assetId];
+      var key = o.assetId || 'manual-' + obsDate(o);
+      var cur = byAsset[key];
       var better = !cur || (o.confidence == null ? 0 : o.confidence) > (cur.confidence == null ? 0 : cur.confidence);
-      if (better) byAsset[o.assetId] = o;
+      if (better) byAsset[key] = o;
     });
     var all = Object.keys(byAsset).map(function (k) { return byAsset[k]; })
       .filter(function (o) { return String(o.value || '').trim() !== ''; });
@@ -472,15 +503,16 @@
     });
     dates.sort();
 
-    var picked = S.dateFilter
-      ? all.filter(function (o) { return obsDate(o) === S.dateFilter; })
+    var picked = dateFilter
+      ? all.filter(function (o) { return obsDate(o) === dateFilter; })
       : all;
 
     // 没识别到：只有标了必填的才算质控问题，其余只是"这次没提供"
     if (!picked.length) {
+      var matching = dateFilter ? list.filter(function (o) { return obsDate(o) === dateFilter; }) : list;
       return {
         state: isRequired(indId) ? 'missing' : 'absent',
-        obs: list[0] || null, list: list, dates: dates
+        obs: matching[0] || null, list: matching, dates: dates
       };
     }
 
@@ -520,7 +552,7 @@
     var o = sorted[0];
     var extra = { obs: o, list: sorted, dates: dates };
 
-    if (o.warn === 'unit') {
+    if (o.warn === 'unit' && o.method !== 'manual') {
       // 项目认出来了，但单位跟标准库不是一类（比如报告用 mg/dL、库里是 mmol/L）。
       // 不丢值，标成存疑，让人确认要不要换算。
       extra.state = 'low';
@@ -579,25 +611,34 @@
 
   function renderPatients() {
     var box = $('#patient-list');
+    var focused = document.activeElement.closest('#patient-list button');
     box.innerHTML = S.patients.map(function (p) {
-      var n = assetsOf(p.id).length;
-      var active = p.id === S.currentId ? ' active' : '';
-      return '<div class="patient' + active + '" data-pid="' + p.id + '">' +
-        '<div><div class="patient-code">' + esc(p.code) + '</div>' +
-        '<div class="patient-meta">' + n + ' 份报告</div></div>' +
-        '<button class="del" data-del="' + p.id + '" title="移除">×</button>' +
-        '</div>';
+      var active = p.id === S.currentId;
+      return '<div class="patient' + (active ? ' active' : '') + '" data-pid="' + esc(p.id) + '">' +
+        '<button type="button" class="patient-select" aria-current="' + active + '">' +
+        '<span class="patient-code">' + esc(p.code) + '</span>' +
+        '<span class="patient-meta">' + assetsOf(p.id).length + ' 页报告 · ' + patientStatus(p.id) + '</span></button>' +
+        '<button type="button" class="del" data-del="' + esc(p.id) + '" aria-label="移除' + esc(p.code) + '">×</button></div>';
     }).join('');
-
-    if (!S.patients.length) {
-      box.innerHTML = '<div class="patient-meta">还没有患者</div>';
-      return;
+    $('#queue-count').textContent = S.patients.length + ' 位';
+    $('#btn-all-patients').setAttribute('aria-pressed', !S.currentId);
+    if (focused) {
+      var row = Array.from(box.children).find(function (el) { return el.dataset.pid === focused.closest('.patient').dataset.pid; });
+      if (row) row.querySelector(focused.classList.contains('del') ? '.del' : '.patient-select').focus({ preventScroll: true });
     }
+  }
 
-    /* 患者多的时候列表会滚动。新建或切换后，把当前这位滚进视野，
-       否则刚点"添加患者"生成的新患者正好落在可视区外，看着像没加上。 */
-    var act = box.querySelector('.patient.active');
-    if (act) act.scrollIntoView({ block: 'nearest' });
+  function patientStatus(pid) {
+    if (importing.has(pid)) return '导入中';
+    if (S.runningPatientId === pid) return '识别中';
+    var reports = assetsOf(pid);
+    if (!reports.length) return '待上传';
+    var pending = reports.filter(function (a) { return a.status === 'pending'; }).length;
+    if (pending) return pending + ' 页待识别';
+    var failed = reports.filter(function (a) { return a.status === 'error' || a.status === 'skipped'; }).length;
+    if (failed) return failed + ' 页未识别';
+    var n = reviewCounts(pid, '');
+    return n.total ? n.total + ' 项待核对' : '核对完成';
   }
 
   /* ---------------- 渲染：报告缩略图 ---------------- */
@@ -617,39 +658,55 @@
         st = '<span class="asset-state err" title="' + esc(a.error || '') + '">失败</span>';
       } else st = '<span class="asset-state">待识别</span>';
       if (a.lowRes) st = '<span class="asset-state err" title="长边 ' + Math.max(a.width, a.height) + ' 像素，太小，读不出小字">图太小</span>';
-      return '<div class="asset' + (a.lowRes ? ' lowres' : '') + '" data-aid="' + a.id + '" title="' + esc(a.name) + '">' +
-        '<img src="' + a.dataUrl + '" alt="">' +
-        '<div class="asset-foot"><span>' + esc(label) + '</span>' + st + '</div>' +
-        '</div>';
+      return '<div class="report-item"><button type="button" class="asset' + (a.lowRes ? ' lowres' : '') +
+        '" data-aid="' + esc(a.id) + '" title="' + esc(a.name) + '">' +
+        '<img src="' + esc(a.dataUrl) + '" alt="" loading="lazy">' +
+        '<span class="asset-foot"><span>' + esc(label) + '</span>' + st + '</span></button>' +
+        (a.status === 'error' ? '<button type="button" class="link retry-report" data-retry="' + esc(a.id) +
+          '"' + (S.running ? ' disabled' : '') + '>重试识别</button>' : '') + '</div>';
     }).join('');
 
-    // 有报告以后把上传区收成一条，别再占着半屏
     var dz = $('#dropzone');
     var has = list.length > 0;
-    dz.classList.toggle('compact', has);
-    $('#dz-title').textContent = has
-      ? '已上传 ' + list.length + ' 页，可继续追加'
-      : '把报告图片或 PDF 拖到这里';
-    $('#dz-pick').textContent = has ? '继续上传' : '选择文件';
+    dz.hidden = has;
+    var disclosure = $('#report-list');
+    disclosure.hidden = !has;
+    var needsAttention = list.some(function (asset) { return asset.status !== 'done'; });
+    var reportView = p && viewOf(p.id);
+    if (reportView) disclosure.open = reportView.reportsOpen === undefined ? true : reportView.reportsOpen;
+    $('#report-summary').textContent = '报告 · ' + list.length + ' 页';
   }
 
   /* ---------------- 渲染：概览 ---------------- */
 
+  function needsReview(state) {
+    return state === 'conflict' || state === 'missing' || state === 'low';
+  }
+
+  function reviewCounts(pid, date) {
+    var counts = { conflict: 0, missing: 0, low: 0, total: 0 };
+    targetIds().forEach(function (id) {
+      var state = cellState(pid, id, date).state;
+      if (needsReview(state)) {
+        counts[state]++;
+        counts.total++;
+      }
+    });
+    return counts;
+  }
+
   function renderStats() {
     var p = current();
-    var ids = targetIds();
-    var n = { missing: 0, low: 0, ok: 0, conflict: 0, absent: 0 };
-    if (p) {
-      ids.forEach(function (id) {
-        var s = cellState(p.id, id).state;
-        if (s === 'conflict') n.conflict++; else n[s]++;
-      });
-    }
-    var red = n.missing + n.conflict;
-    $('#stats').innerHTML =
-      '<div class="stat red"><b>' + red + '</b><span>必填缺失</span></div>' +
-      '<div class="stat amber"><b>' + n.low + '</b><span>存疑</span></div>' +
-      '<div class="stat green"><b>' + n.ok + '</b><span>已识别</span></div>';
+    if (!p) return;
+    var available = hasResults(p.id);
+    var n = reviewCounts(p.id, S.dateFilter);
+    $('#btn-review').textContent = '待核对 ' + (available ? n.total : 0);
+    $('#btn-results-all').textContent = '全部结果 ' + targetIds().length;
+    $('#stats').innerHTML = ['conflict', 'missing', 'low'].filter(function (state) {
+      return available && n[state];
+    }).map(function (state) {
+      return '<span class="stat badge ' + state + '">' + STATE_NAME[state] + ' ' + n[state] + '</span>';
+    }).join('');
   }
 
   /* ---------------- 渲染：表格 ---------------- */
@@ -669,31 +726,94 @@
     return a ? assetLabel(a, date) : '未知来源';
   }
 
-  function badgeOf(state) {
-    var text = {
-      ok: '已识别', low: '置信度低', missing: '必填缺失',
-      conflict: '两处不一致', absent: '未提供'
-    }[state];
-    return text ? '<span class="badge ' + state + '">' + text + '</span>' : '';
+  function stateLabel(c) {
+    if (c.state === 'ok' && c.obs && c.obs.method === 'manual') return '人工已核对';
+    if (c.state === 'low' && c.obs && c.obs.warn === 'unit') return '单位待确认';
+    return STATE_NAME[c.state] || '';
+  }
+
+  function badgeOf(c) {
+    return '<span class="badge ' + c.state + '">' + stateLabel(c) + '</span>';
+  }
+
+  function resultRow(id, c, review) {
+    var ind = window.Library.byId(id);
+    var value = c.obs && c.obs.value != null ? String(c.obs.value) : '';
+    var unit = (c.obs && c.obs.unit) || ind.unit || (ind.type === 'date' ? '日期' : '');
+    var ref = (c.obs && c.obs.ref) || ind.ref;
+    var detail = viewOf(S.currentId).detail;
+    var focused = detail && detail.indId === id;
+    var source = c.obs && c.obs.assetId;
+    var sourceText = c.state === 'conflict' ? c.list.length + ' 个来源' : (source ? srcLabel(source, c.obs.date) : '');
+    var sourceButton = sourceText ? '<button type="button" class="src-link' + (c.state === 'conflict' ? ' conflict-src' : '') +
+      '" data-cmp="' + esc(id) + '">' + esc(sourceText) + '</button>' : '';
+    if (!S.dateFilter && c.dates && c.dates.length > 1) {
+      sourceButton += ' <button type="button" class="date-hint" data-cmp="' + esc(id) +
+        '">另有 ' + (c.dates.length - 1) + ' 次</button>';
+    }
+    var displayValue = c.state === 'conflict'
+      ? c.list.map(function (o) { return o.value; }).filter(function (v, i, all) { return all.indexOf(v) === i; }).join(' / ')
+      : value;
+    // 冲突行要同时看到两个来源的值，保持只读；其余行一律可直接改。待核对页也一样，
+    // 看到不对就地改，不必再切到"全部结果"或打开右侧检查器。
+    var valueCell = (review && c.state === 'conflict')
+      ? '<span class="result-value">' + esc(displayValue || '—') + '</span>'
+      : '<input class="val-input" data-ind="' + esc(id) + '" aria-label="' + esc(ind.name) +
+        '结果" value="' + esc(value) + '" placeholder="未识别">';
+
+    return '<tr class="' + c.state + (focused ? ' selected-result' : '') + '" data-ind="' + esc(id) + '">' +
+      '<td class="col-name"><div class="ind-name"><span class="ind-dot ' + c.state + '"></span>' +
+      '<div><button type="button" class="indicator-link" data-cmp="' + esc(id) + '"' +
+      ' aria-pressed="' + Boolean(focused) + '">' + esc(ind.name) + '</button>' +
+      '<div class="ind-code">' + esc(id) + '</div></div></div></td>' +
+      '<td class="col-value">' + valueCell + '<span class="unit-inline">' + esc(unit) + '</span></td>' +
+      '<td class="col-unit">' + esc(unit) + '</td><td class="col-ref">' + esc(ref) + '</td>' +
+      '<td class="col-src"><span class="cell-state">' + badgeOf(c) + '</span>' + sourceButton +
+      (source && c.obs.src === 'narrative' ? '<span class="src-tag">文中</span>' : '') + '</td></tr>';
+  }
+
+  function reviewRows(pid) {
+    return targetIds().map(function (id) {
+      return { id: id, c: cellState(pid, id) };
+    }).filter(function (row) {
+      return needsReview(row.c.state);
+    }).sort(function (a, b) {
+      return STATE_RANK[a.c.state] - STATE_RANK[b.c.state];
+    });
+  }
+
+  function hasResults(pid) {
+    return assetsOf(pid).some(function (a) { return a.status === 'done'; }) ||
+      S.observations.some(function (o) { return o.patientId === pid; });
   }
 
   function renderTable() {
     var body = $('#grid-body');
     var p = current();
-
-    if (!p) {
-      body.innerHTML = '<tr><td colspan="5" class="empty-hint">先添加一位患者</td></tr>';
-      return;
-    }
-    if (!assetsOf(p.id).length) {
-      body.innerHTML = '<tr><td colspan="5" class="empty-hint">这位患者还没有报告，先在上面上传</td></tr>';
-      return;
-    }
+    if (!p) return;
 
     var sel = loadSelected();
     var tgt = targetIds();
+    var review = viewOf(p.id).mode === 'review';
+    var rows = review && hasResults(p.id) ? reviewRows(p.id) : [];
+    var table = $('#results-table');
+    var empty = $('#results-empty');
+    table.dataset.view = review ? 'review' : 'all';
+    table.hidden = review ? !rows.length : !tgt.length;
+    empty.hidden = !table.hidden;
+    $('#btn-review').setAttribute('aria-pressed', review);
+    $('#btn-results-all').setAttribute('aria-pressed', !review);
 
-    renderDateBar();
+    if (table.hidden) {
+      body.innerHTML = '';
+      empty.textContent = !tgt.length ? '本次未选择检查页面。可以在本批质控规则中添加。' :
+        hasResults(p.id) ? '当前没有待核对项。' : '识别完成后，待核对项会显示在这里。';
+      return;
+    }
+    if (review) {
+      body.innerHTML = rows.map(function (row) { return resultRow(row.id, row.c, true); }).join('');
+      return;
+    }
 
     // 指标按"第一个包含它的已选页面"归组；同一个指标出现在多个页面里（综合生化）
     // 只在第一处出现一次，免得同一项在表里重复两遍。
@@ -721,10 +841,11 @@
       rows.forEach(function (r) { n[r.c.state] = (n[r.c.state] || 0) + 1; });
 
       // 用户点过就听用户的；没点过时，一个字都没读到的页面默认收起，省得 140 行里翻半天。
+      // 但在"全部结果"里，默认全展开——既然要"全部"，就别让人再点七次。
       // 注意：默认值不写回 S.collapse——否则第一次渲染时的"全灰"状态会被永久记住。
       var stored = S.collapse[g.page.id];
       var collapsed = stored === undefined
-        ? ((n.conflict + n.missing + n.low + n.ok) === 0)
+        ? (viewOf(S.currentId).mode === 'all' ? false : ((n.conflict + n.missing + n.low + n.ok) === 0))
         : stored;
 
       var countBits = [];
@@ -735,70 +856,90 @@
       if (n.absent) countBits.push('<b class="c-gray">' + n.absent + ' 未提供</b>');
 
       var head = '<tr class="group-row" data-page="' + esc(g.page.id) + '">' +
-        '<td colspan="5"><span class="caret">' + (collapsed ? '▸' : '▾') + '</span>' +
+        '<td colspan="5"><button type="button" class="group-toggle" aria-expanded="' + !collapsed + '">' +
+        '<span class="caret" aria-hidden="true">' + (collapsed ? '▸' : '▾') + '</span>' +
         '<span class="gname">' + esc(g.page.name) + '</span>' +
-        '<span class="gcount">' + countBits.join(' · ') + '</span></td></tr>';
+        '<span class="gcount">' + countBits.join(' · ') + '</span></button></td></tr>';
 
-      var bodyRows = rows.map(function (r) {
-        var ind = window.Library.byId(r.id);
-        var c = r.c;
-        var value = c.obs && c.obs.value != null ? String(c.obs.value) : '';
-        var isNum = (ind.type || 'num') === 'num';
-
-        var srcCell = '';
-        if (c.state === 'conflict' && c.list && c.list.length > 1) {
-          // 冲突就把几个来源全列出来，点一下能看到每一份的原文
-          var labels = c.list.slice(0, 3).map(function (o) { return srcLabel(o.assetId, o.date); });
-          if (c.list.length > 3) labels.push('等 ' + c.list.length + ' 份');
-          srcCell = '<button class="src-link conflict-src" data-cmp="' + esc(r.id) + '" ' +
-            'title="点开看每一份报告读到的值和日期">' + esc(labels.join(' / ')) + '</button>';
-        } else if (c.obs && c.obs.assetId) {
-          var a = S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0];
-          if (a) {
-            srcCell = '<button class="src-link" data-src="' + a.id + '">' +
-              esc(assetLabel(a, c.obs.date)) + '</button>';
-            // 从叙述段落里摘出来的值：来源照样可点，但加个标记，说明它不是从化验单的表格里来的
-            if (c.obs.src === 'narrative') {
-              srcCell += ' <span class="src-tag" title="这个值是从正文叙述里摘出来的，不是化验单表格">文中</span>';
-            }
-          }
-        }
-
-        // 这个指标在别的就诊日期上还有值：提醒一下"还有几次"，免得以为只有这一次
-        if (!S.dateFilter && c.dates && c.dates.length > 1) {
-          srcCell += ' <button class="date-hint" data-cmp="' + esc(r.id) + '" ' +
-            'title="点开看每次就诊的值">另有 ' + (c.dates.length - 1) + ' 次</button>';
-        }
-
-        // 参考范围优先用报告上印的那一栏：各实验室按性别、年龄分组，比库里的默认值准
-        var refText = (c.obs && String(c.obs.ref || '').trim()) || (isNum ? ind.ref : '');
-        return '<tr class="' + c.state + '"' + (collapsed ? ' hidden' : '') + ' data-ind="' + r.id + '">' +
-          '<td><div class="ind-name"><span class="ind-dot ' + c.state + '"></span>' +
-            '<div><div>' + esc(ind.name) + '</div><div class="ind-code">' + esc(ind.id) + '</div></div></div></td>' +
-          '<td><input class="val-input" data-ind="' + r.id + '" value="' + esc(value) + '" placeholder="未识别"></td>' +
-          '<td>' + esc(isNum ? ind.unit : (ind.type === 'date' ? '日期' : '')) + '</td>' +
-          '<td>' + esc(refText) + '</td>' +
-          '<td>' + srcCell + ' ' + badgeOf(c.state) + '</td>' +
-          '</tr>';
+      var bodyRows = collapsed ? '' : rows.map(function (r) {
+        return resultRow(r.id, r.c, false);
       }).join('');
 
       return head + bodyRows;
     }).join('');
 
-    body.innerHTML = html || '<tr><td colspan="5" class="empty-hint">本次没有勾选任何页面</td></tr>';
+    body.innerHTML = html;
+    // 时间轴条跟着表格一起刷新：只重绘表格的地方（点分组头、人工裁决）也要更新，
+    // 否则日期 chip 会停在旧状态。
+    renderDateBar();
   }
 
-  function renderAll() {
+  function renderRuleSummary() {
+    var config = loadSelected();
+    var preset = activeGroups().find(function (g) { return g.pageIds.length === config.ids.length; });
+    var targets = targetIds();
+    $('#rule-label').textContent = preset ? preset.name : '自定义规则';
+    $('#rule-summary').textContent = config.ids.length + ' 个页面 · ' +
+      requiredIds().filter(function (id) { return targets.includes(id); }).length + ' 项必填';
+  }
+
+  function renderBatchOverview() {
+    var overview = $('#batch-overview');
+    overview.innerHTML = S.patients.length ? '<div class="table-wrap"><table class="grid"><thead><tr>' +
+      '<th scope="col">患者</th><th scope="col">报告页</th><th scope="col">处理状态</th>' +
+      '</tr></thead><tbody>' + S.patients.map(function (p) {
+        return '<tr><td><button type="button" class="indicator-link" data-pid="' + esc(p.id) + '">' +
+          esc(p.code) + '</button></td><td>' + assetsOf(p.id).length + ' 页</td><td>' +
+          patientStatus(p.id) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' : '<div class="stage-empty">添加患者后，即可导入报告。</div>';
+  }
+
+  function renderWorkspace() {
     var p = current();
-    $('#patient-title').textContent = p ? p.code : '尚无患者';
-    $('#patient-sub').textContent = p
-      ? (assetsOf(p.id).length + ' 份报告 · 要看 ' + targetIds().length + ' 项，其中必填 ' + requiredIds().length + ' 项')
-      : '先添加一位患者，再上传其名下的报告';
-    renderPageChecks();
-    renderPatients();
+    var reports = p ? assetsOf(p.id) : [];
+    $('#patient-title').textContent = p ? p.code : '全部患者';
+    $('#patient-sub').textContent = p ? reports.length + ' 页报告 · ' + patientStatus(p.id) :
+      '本批 ' + S.patients.length + ' 位患者 · 选择一位患者查看报告';
+    $('#export-scope').textContent = '导出范围 · ' + exportScopeLabel(p ? [p] : S.patients, !!p);
+    $('#btn-export').disabled = $('#btn-export-json').disabled = !S.patients.length;
+    $('#btn-reset').disabled = S.running || importing.size > 0;
+    $('#btn-rules').disabled = S.running;
+    $('#btn-settings').disabled = S.running;
+    $('#work-actions').hidden = $('#patient-work').hidden = !p;
+    $('#batch-overview').hidden = !!p;
+    if (!p) { renderBatchOverview(); return; }
+
+    var waiting = reports.some(function (a) { return a.status === 'pending' || a.status === 'error'; });
+    var running = S.runningPatientId === p.id;
+    var loading = importing.has(p.id);
+    var upload = $('#btn-upload');
+    upload.hidden = !reports.length;
+    upload.disabled = $('#dz-pick').disabled = loading;
+    var run = $('#btn-run');
+    run.hidden = !waiting && !running;
+    run.disabled = S.running || loading;
+    run.innerHTML = running ? '<span class="spin" aria-hidden="true"></span>识别中…' : '开始识别';
+    var note = $('#recognition-note');
+    note.hidden = !waiting || running;
+    note.textContent = window.Model.getConfig().hasKey ?
+      '开始识别会将这位患者的报告页发送到已配置的模型服务。' : '开始识别前，请先配置模型 API Key。';
+    var status = $('#recognition-status');
+    status.hidden = !running && !loading;
+    status.textContent = loading ? '正在导入报告…' : running && S.progress ?
+      '正在识别 ' + S.progress.done + ' / ' + S.progress.total + ' 页' : '';
+    $('#results').hidden = !reports.length;
+    renderDateBar();
     renderAssets();
     renderStats();
     renderTable();
+  }
+
+  function renderAll() {
+    renderRuleSummary();
+    renderPageChecks();
+    renderPatients();
+    renderWorkspace();
+    renderInspector();
     cacheSchedule();
   }
 
@@ -826,9 +967,11 @@
       bar.hidden = true;
       bar.innerHTML = '';
       if (dates.length < 2 && S.dateFilter) S.dateFilter = '';
+      if (p) viewOf(p.id).date = S.dateFilter;
       return;
     }
     if (S.dateFilter && dates.indexOf(S.dateFilter) === -1) S.dateFilter = '';
+    viewOf(p.id).date = S.dateFilter;
     bar.hidden = false;
     bar.innerHTML =
       '<span class="date-label">时间轴</span>' +
@@ -842,20 +985,43 @@
 
   /* ---------------- 患者 ---------------- */
 
+  function selectPatient(id) {
+    if (S.currentId) viewOf(S.currentId).scroll = $('#work').scrollTop;
+    S.currentId = id;
+    var view = id ? viewOf(id) : null;
+    S.dateFilter = view ? view.date : '';
+    S.collapse = view ? view.collapse : {};
+    renderAll();
+    $('#work').scrollTop = view ? view.scroll : 0;
+  }
+
   function addPatient(silent) {
-    var p = { id: uid('patient'), code: '患者 ' + String(S.patients.length + 1).padStart(2, '0') };
+    var id = uid('patient');
+    var p = { id: id, code: '患者 ' + String(S.seq.patient).padStart(2, '0') };
     S.patients.push(p);
-    S.currentId = p.id;
-    if (!silent) renderAll();
+    if (silent) {
+      S.currentId = id;
+      S.dateFilter = '';
+      S.collapse = viewOf(id).collapse;
+    } else {
+      selectPatient(id);
+      $('.patient.active').scrollIntoView({ block: 'nearest' });
+    }
     return p;
   }
 
   function removePatient(pid) {
+    if (importing.has(pid) || S.runningPatientId === pid) {
+      toast('请等这位患者的导入或识别完成后再移除。', 'err');
+      return;
+    }
+    if (assetsOf(pid).length && !confirm('移除这位患者及其所有报告和识别结果？')) return;
     S.patients = S.patients.filter(function (p) { return p.id !== pid; });
     S.assets = S.assets.filter(function (a) { return a.patientId !== pid; });
     S.observations = S.observations.filter(function (o) { return o.patientId !== pid; });
-    if (S.currentId === pid) S.currentId = S.patients[0] ? S.patients[0].id : null;
-    renderAll();
+    if (S.currentId === pid) selectPatient(null);
+    else renderAll();
+    patientViews.delete(pid);
   }
 
   /* ---------------- 导入报告 ---------------- */
@@ -890,13 +1056,13 @@
     });
   }
 
-  async function ingestImage(file, fileIndex) {
+  async function ingestImage(file, fileIndex, pid) {
     var raw = await readAsDataUrl(file);
     var small = await downscale(raw, MAX_IMAGE_EDGE);
     var edge = Math.max(small.width, small.height);
-    S.assets.push({
+    return {
       id: uid('asset'),
-      patientId: S.currentId,
+      patientId: pid,
       kind: 'image',
       name: file.name,
       fileIndex: fileIndex,
@@ -907,11 +1073,10 @@
       lowRes: edge < MIN_EDGE,
       status: 'pending',
       error: ''
-    });
-    if (edge < MIN_EDGE) smallCount++;
+    };
   }
 
-  async function ingestPdf(file, fileIndex) {
+  async function ingestPdf(file, fileIndex, pid) {
     if (!window.PdfTools) throw new Error('PDF 组件没有加载，请刷新页面');
     var pdf = await window.PdfTools.openPdf(file);
     var total = Math.min(pdf.numPages, PDF_MAX_PAGES);
@@ -927,63 +1092,75 @@
       });
     } catch (e) { texts = {}; }
 
-    for (var i = 1; i <= total; i++) {
-      var img = await window.PdfTools.renderPage(pdf, i, {
-        dpi: 150,
-        maxEdge: MAX_IMAGE_EDGE,
-        imageType: 'image/jpeg',
-        quality: JPEG_QUALITY
-      });
-      S.assets.push({
-        id: uid('asset'),
-        patientId: S.currentId,
-        kind: 'pdf',
-        name: file.name,
-        fileIndex: fileIndex,
-        pageNo: i,
-        dataUrl: img.dataUrl,
-        width: img.width,
-        height: img.height,
-        pageText: texts[i] || '',
-        status: 'pending',
-        error: ''
-      });
+    var pages = [];
+    try {
+      for (var i = 1; i <= total; i++) {
+        var img = await window.PdfTools.renderPage(pdf, i, {
+          dpi: 150,
+          maxEdge: MAX_IMAGE_EDGE,
+          imageType: 'image/jpeg',
+          quality: JPEG_QUALITY
+        });
+        pages.push({
+          id: uid('asset'),
+          patientId: pid,
+          kind: 'pdf',
+          name: file.name,
+          fileIndex: fileIndex,
+          pageNo: i,
+          dataUrl: img.dataUrl,
+          width: img.width,
+          height: img.height,
+          pageText: texts[i] || '',
+          status: 'pending',
+          error: ''
+        });
+      }
+      if (pdf.numPages > PDF_MAX_PAGES) {
+        toast('这份 PDF 有 ' + pdf.numPages + ' 页，只取了前 ' + PDF_MAX_PAGES + ' 页', 'err');
+      }
+      return pages;
+    } finally {
+      await pdf.destroy();
     }
-    if (pdf.numPages > PDF_MAX_PAGES) {
-      toast('这份 PDF 有 ' + pdf.numPages + ' 页，只取了前 ' + PDF_MAX_PAGES + ' 页', 'err');
-    }
-    await pdf.destroy();
   }
 
   async function handleFiles(files) {
-    if (!S.currentId) addPatient(true);
     var list = Array.prototype.slice.call(files || []);
     if (!list.length) return;
-
-    var fileIndex = assetsOf(S.currentId).reduce(function (m, a) {
+    var p = current();
+    if (!p || importing.has(p.id)) return;
+    importing.add(p.id);
+    viewOf(p.id).reportsOpen = undefined;
+    var fileIndex = assetsOf(p.id).reduce(function (m, a) {
       return Math.max(m, a.fileIndex || 0);
     }, 0);
-
-    smallCount = 0;
-    for (var i = 0; i < list.length; i++) {
-      var f = list[i];
-      fileIndex++;
-      try {
-        if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
-          await ingestPdf(f, fileIndex);
-        } else if (/^image\//.test(f.type)) {
-          await ingestImage(f, fileIndex);
-        } else {
-          toast('跳过不支持的文件：' + f.name, 'err');
-          fileIndex--;
+    var smallCount = 0;
+    renderAll();
+    try {
+      for (var f of list) {
+        try {
+          var pages;
+          if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
+            pages = await ingestPdf(f, fileIndex + 1, p.id);
+          } else if (/^image\//.test(f.type)) {
+            pages = [await ingestImage(f, fileIndex + 1, p.id)];
+          } else {
+            toast('跳过不支持的文件：' + f.name, 'err');
+            continue;
+          }
+          fileIndex++;
+          S.assets.push.apply(S.assets, pages);
+          smallCount += pages.filter(function (page) { return page.lowRes; }).length;
+          cacheSchedule();
+        } catch (e) {
+          toast(e.message || String(e), 'err');
         }
-      } catch (e) {
-        fileIndex--;
-        toast(e.message || String(e), 'err');
       }
+    } finally {
+      importing.delete(p.id);
       renderAll();
     }
-    renderAll();
     if (smallCount) {
       toast('有 ' + smallCount + ' 张图的长边不到 ' + MIN_EDGE + ' 像素（像是聊天里存下来的缩略图）。' +
         '这个尺寸连印刷体都读不清，模型只会给出低置信度的结果。请换成原图或重新拍照。', 'err');
@@ -1237,32 +1414,52 @@
 
   /* 单页重试：失败的那一份点一下就重来，不用整批重跑 */
   async function retryOne(asset) {
-    if (!asset || asset.status === 'running') return;
-    asset.status = 'running';
+    if (!asset || S.running || asset.lowRes || asset.patientId !== S.currentId ||
+      (asset.status !== 'error' && asset.status !== 'pending')) return;
+    if (!window.Model.getConfig().hasKey) { openSettings(); return; }
+    S.running = true;
+    S.runningPatientId = asset.patientId;
+    S.progress = { done: 0, total: 1 };
     asset.error = '';
-    renderAssets();
+    renderAll();
     try {
       await recognizeAsset(asset);
     } catch (e) {
       asset.status = 'error';
       asset.error = e.message || String(e);
       toast('这一页还是失败：' + asset.error, 'err');
+    } finally {
+      finishRecognition(asset.patientId);
     }
+  }
+
+  function finishRecognition(pid) {
+    S.running = false;
+    S.runningPatientId = null;
+    S.progress = null;
+    var view = viewOf(pid);
+    // 识别完默认跳到"待核对"（先看问题）；但用户自己切到"全部结果"看惯了就别再把他拽回去，
+    // 否则表格会突然变空，看着像"什么都没识别出来"。
+    if (!view.modeChosen) view.mode = 'review';
+    view.reportsOpen = undefined;
+    updatePill();
     renderAll();
   }
 
   async function runRecognize() {
     if (S.running) return;
     var p = current();
-    if (!p) { toast('先添加一位患者', 'err'); return; }
+    if (!p || importing.has(p.id)) return;
+    if (!window.Model.getConfig().hasKey) { openSettings(); return; }
 
     // 本地服务断了的话，请求根本发不出去，先告诉用户真正的原因
     if (heartbeat.offline) {
       var back = await ping();
       if (back !== 'ok') { toast('本地服务断了（start.bat 那个黑窗口还在吗？）。重新双击 start.bat 再试。', 'err'); return; }
     }
+    if (S.running || !S.patients.includes(p) || importing.has(p.id)) return;
 
-    var todo = assetsOf(p.id).filter(function (a) { return a.status !== 'done'; });
+    var todo = assetsOf(p.id).filter(function (a) { return a.status === 'pending' || a.status === 'error'; });
 
     // 长边不到 900 像素的图不送去识别。实测这种图不会"读得差一点"，
     // 而是要么卡很久最后返回空，要么读成相邻的、看着很像的数字——
@@ -1281,8 +1478,11 @@
     }
 
     S.running = true;
-    setRunning(true);
-    var done = 0, failed = 0;
+    S.runningPatientId = p.id;
+    S.progress = { done: 0, total: todo.length };
+    setPill('识别中 0/' + todo.length, 'busy');
+    renderAll();
+    var failed = 0;
 
     var queue = todo.slice();
     async function worker() {
@@ -1305,30 +1505,23 @@
           failed++;
           toast('第 ' + a.fileIndex + ' 份报告识别失败：' + a.error, 'err');
         }
-        done++;
-        setPill('识别中 ' + done + '/' + todo.length, 'busy');
+        S.progress.done++;
+        setPill('识别中 ' + S.progress.done + '/' + todo.length, 'busy');
         renderAll();
       }
     }
 
     var workers = [];
     for (var i = 0; i < Math.min(CONCURRENCY, todo.length); i++) workers.push(worker());
-    await Promise.all(workers);
-
-    S.running = false;
-    setRunning(false);
-    updatePill();
-    renderAll();
+    try {
+      await Promise.all(workers);
+    } finally {
+      finishRecognition(p.id);
+    }
 
     var u = window.Model.getUsage();
-    toast('识别完成：' + Math.max(0, todo.length - failed) + ' 页成功，' + failed + ' 页失败。' +
+    toast(p.code + '识别完成：' + Math.max(0, todo.length - failed) + ' 页成功，' + failed + ' 页失败。' +
       '本次累计调用 ' + u.calls + ' 次，平均 ' + u.avgMs + ' ms/次', failed ? 'err' : 'ok');
-  }
-
-  function setRunning(on) {
-    var btn = $('#btn-run');
-    btn.disabled = on;
-    btn.innerHTML = on ? '<span class="spin"></span>识别中…' : '开始识别';
   }
 
   /* ---------------- 顶栏状态 ---------------- */
@@ -1350,8 +1543,9 @@
   function openModal(html, cls) {
     var m = $('#modal');
     $('#modal-box').className = 'modal-box' + (cls ? ' ' + cls : '');
-    $('#modal-box').innerHTML = '<button class="modal-close" data-close="1">×</button>' + html;
+    $('#modal-box').innerHTML = '<button type="button" class="modal-close" data-close="1" aria-label="关闭">×</button>' + html;
     m.hidden = false;
+    $('#modal-box .modal-close').focus();
   }
 
   function closeModal() {
@@ -1365,14 +1559,14 @@
     var c = window.Model.getConfig();
     openModal(
       '<h3>模型设置</h3>' +
-      '<div class="field"><label>API Key</label>' +
+      '<div class="field"><label for="cfg-key">API Key</label>' +
       '<input id="cfg-key" type="password" placeholder="sk-..." value="' + esc(c.hasKey ? '••••••••' : '') + '">' +
       '<p class="note">只保存在这台电脑的浏览器里（localStorage），不会上传到任何地方，也不会写进导出的文件。' +
       '需要在模型服务商后台自行申请。</p></div>' +
-      '<div class="field"><label>接口地址</label>' +
+      '<div class="field"><label for="cfg-base">接口地址</label>' +
       '<input id="cfg-base" value="' + esc(c.base) + '">' +
       '<p class="note">默认 https://api.deepseek.com。换成别的服务商时，要确认它允许浏览器直接调用。</p></div>' +
-      '<div class="field"><label>模型</label>' +
+      '<div class="field"><label for="cfg-model">模型</label>' +
       '<input id="cfg-model" value="' + esc(c.model) + '">' +
       '<p class="note">必须是能看图的模型。纯文本模型不会报错，但会编出结果——这比失败更危险。</p></div>' +
       '<button id="cfg-save" class="btn primary">保存</button>'
@@ -1388,114 +1582,172 @@
       window.Model.setConfig(next);
       closeModal();
       updatePill();
+      renderWorkspace();
       toast('已保存', 'ok');
     });
   }
 
-  function openSource(assetId) {
-    var a = S.assets.filter(function (x) { return x.id === assetId; })[0];
-    if (!a) return;
-    var related = S.observations.filter(function (o) { return o.assetId === assetId; });
-    var rows = related.map(function (o) {
-      var ind = window.IndicatorLib.byId(o.indicatorId);
-      return '<div style="font-size:12px;color:#5b6472;margin-top:4px">' +
-        esc(ind ? ind.name : o.indicatorId) + '：原文「' + esc(o.rawName) + '」→ ' + esc(o.value || '空') +
-        (o.unit ? ' ' + esc(o.unit) : '') + '</div>';
-    }).join('');
-
-    var opts = Object.keys(DOC_PAGES).map(function (t) {
-      return '<option value="' + esc(t) + '"' + (a.docType === t ? ' selected' : '') + '>' + esc(t) + '</option>';
-    }).join('');
-
-    openModal(
-      '<h3>' + esc(a.kind === 'pdf' ? '报告 ' + a.fileIndex + ' · 第 ' + a.pageNo + ' 页' : '报告 ' + a.fileIndex) + '</h3>' +
-      '<p class="source-meta">' + esc(a.name) + '</p>' +
-      '<div class="field" style="margin-bottom:10px">' +
-        '<label>文书类型（认错了会少抽指标，可以在这里改）</label>' +
-        '<div style="display:flex;gap:8px;align-items:center">' +
-          '<select id="src-type" style="flex:1">' + opts + '</select>' +
-          '<button id="src-retype" class="btn tiny">按这个类型重抽</button>' +
-        '</div>' +
-      '</div>' +
-      '<img class="source-img" src="' + a.dataUrl + '" alt="">' +
-      (rows ? '<div style="margin-top:12px">' + rows + '</div>' : '')
-    );
-
-    var btn = $('#src-retype');
-    if (btn) {
-      btn.addEventListener('click', function () {
-        var t = $('#src-type').value;
-        a.docType = t;
-        a.typeForced = true;
-        a.status = 'pending';                 // 下次点"开始识别"会重抽这一页
-        S.observations = S.observations.filter(function (o) { return o.assetId !== a.id; });
-        closeModal();
-        renderAll();
-        toast('已改成「' + t + '」，点"开始识别"重新抽取这一页', 'ok');
-      });
-    }
+  function reportAsset(assetId) {
+    return S.assets.find(function (a) { return a.id === assetId && a.patientId === S.currentId; });
   }
 
-  /* 两处不一致：把每一份报告读到的值并排列出来，点哪一行看哪一页。
-     光说"不一致"没用——人得知道差在哪、差多少、是不是同一次就诊。 */
-  function openCompare(indId) {
+  function showDetail(detail) {
     var p = current();
     if (!p) return;
-    var c = cellState(p.id, indId);
-    var ind = window.Library.byId(indId);
-    if (!ind) return;
-
-    var isConflict = c.state === 'conflict';
-    var span = c.dates && c.dates.length > 1;
-
-    var rows = (c.list || []).map(function (o) {
-      var a = S.assets.filter(function (x) { return x.id === o.assetId; })[0];
-      return '<tr>' +
-        '<td class="mono">' + esc(srcLabel(o.assetId, o.date)) + '</td>' +
-        '<td><b>' + esc(o.value || '空') + '</b> ' + esc(o.unit || '') + '</td>' +
-        '<td class="muted">' + esc(o.ref || '') + '</td>' +
-        '<td class="tiny muted">' + esc(o.rawName || '') + '</td>' +
-        '<td class="row-act">' +
-          (a ? '<button class="link" data-src="' + a.id + '">看原页</button>' : '') +
-          // 只有"同一次就诊里对不上"才需要裁决；跨次就诊的差异不该有一键作废的入口
-          (isConflict ? '<button class="link" data-pick="' + esc(o.id) + '">以此为准</button>' : '') +
-        '</td>' +
-        '</tr>';
-    }).join('');
-
-    openModal(
-      '<h3>' + esc(ind.name) + (isConflict ? ' · 同一次就诊里对不上' : ' · 各次就诊的值') + '</h3>' +
-      '<p class="note">' + (isConflict
-        ? '同一次就诊的两份报告给了不同的值，那才是真的对不上。常见原因：其中一份不是检验单（比如出院记录正文里顺带提到过这个数），或者确实读错了。'
-        : '这个指标在不同日期的报告里都有值。同一个人住过几次院，每次的数本来就不一样，所以不算"对不上"；' +
-          '表格里默认显示最近一次，想只看某一次可以点上面的时间轴。') + '</p>' +
-      '<table class="mini-grid cmp-table"><thead><tr>' +
-        '<th>来源</th><th>读到的值</th><th>参考范围</th><th>原文项目名</th><th></th>' +
-      '</tr></thead><tbody>' + rows + '</tbody></table>' +
-      (isConflict
-        ? '<p class="note">点"以此为准"，同一天的其余来源会被丢掉，这一项立即变成已识别；别的就诊记录的数值不受影响。也可以直接回到表格里改这个值。</p>'
-        : (span ? '<p class="note">这里只做对照，不用裁决——它们本来就是不同时间的两次检查。</p>' : '')) +
-      '',
-      'wide'
-    );
+    viewOf(p.id).detail = detail;
+    renderTable();
+    renderInspector();
+    var heading = $('#inspector-title');
+    if (heading) heading.focus({ preventScroll: true });
   }
 
-  /* 人工裁决：认了某一条，**同一天**的其它来源作废——否则它永远红着。
-     别的就诊日的记录必须留着：那是历史，不是这次的错。 */
-  function pickObservation(obsId) {
-    var keep = S.observations.filter(function (o) { return o.id === obsId; })[0];
-    if (!keep) return;
-    var keepDate = obsDate(keep);
-    S.observations = S.observations.filter(function (o) {
-      if (o.id === obsId) return true;
-      if (o.patientId !== keep.patientId || o.indicatorId !== keep.indicatorId) return true;
-      return obsDate(o) !== keepDate;   // 只作废同一天的
-    });
-    keep.method = 'manual';          // 人工确认过的，不再因为置信度低而标黄
-    keep.confidence = 1;
-    closeModal();
+  function openSource(assetId) {
+    if (reportAsset(assetId)) showDetail({ assetId: assetId });
+  }
+
+  function openCompare(indId) {
+    if (window.Library.byId(indId)) showDetail({ indId: indId });
+  }
+
+  function inspectorHeading(title, detail) {
+    return '<div class="inspector-heading"><div><h2 id="inspector-title" tabindex="-1">' + esc(title) + '</h2>' +
+      '<p class="muted">' + esc(detail) + '</p></div>' +
+      '<button type="button" class="btn inspector-close" data-inspector="close" aria-label="关闭核对详情">×</button></div>';
+  }
+
+  function sourceImage(asset, caption) {
+    return '<figure class="source-page"><figcaption><span>' + esc(caption) + '</span>' +
+      '<button type="button" class="link" data-zoom="' + esc(asset.id) + '">放大原图</button></figcaption>' +
+      '<img class="source-img" src="' + esc(asset.dataUrl) + '" alt="' + esc(assetLabel(asset)) + '原图"></figure>';
+  }
+
+  function reportDetail(a) {
+    var opts = Object.keys(DOC_PAGES).map(function (type) {
+      return '<option value="' + esc(type) + '"' + (a.docType === type ? ' selected' : '') + '>' + esc(type) + '</option>';
+    }).join('');
+    return inspectorHeading(assetLabel(a, a.reportDate), a.name) +
+      (a.error ? '<p role="alert" class="inspector-error">' + esc(a.error) + '</p>' : '') +
+      sourceImage(a, '报告原页') +
+      '<div class="field retype-field"><label for="src-type">文书类型</label>' +
+      '<select id="src-type" class="select">' + opts + '</select>' +
+      '<button id="src-retype" type="button" class="btn"' + (S.running || a.lowRes ? ' disabled' : '') + '>按此类型重新识别</button></div>';
+  }
+
+  function indicatorDetail(ind, detail) {
+    var c = cellState(S.currentId, ind.id);
+    var chosen = c.list.find(function (o) { return o.id === detail.observationId; }) || c.obs;
+    var asset = chosen && reportAsset(chosen.assetId);
+    var multiple = c.list.length > 1 && c.state !== 'missing' && c.state !== 'absent';
+    var html = inspectorHeading(ind.name, current().code + ' · ' + stateLabel(c));
+    if (multiple) {
+      html += '<div class="source-choices" role="group" aria-label="报告来源">' + c.list.map(function (o) {
+        return '<button type="button" class="source-choice" data-observation="' + esc(o.id) + '"' +
+          ' aria-pressed="' + (o === chosen) + '"><span>' + esc(srcLabel(o.assetId, obsDate(o))) + '</span>' +
+          '<strong>' + esc(o.value) + ' ' + esc(o.unit) + '</strong></button>';
+      }).join('') + '</div>';
+    }
+
+    if (chosen && c.state !== 'missing' && c.state !== 'absent') {
+      html += '<dl class="source-value"><div><dt>识别值</dt><dd>' + esc(chosen.value) + ' ' + esc(chosen.unit) + '</dd></div>' +
+        '<div><dt>报告项目</dt><dd>' + esc(chosen.rawName || ind.name) + '</dd></div>' +
+        (chosen.ref ? '<div><dt>参考范围</dt><dd>' + esc(chosen.ref) + '</dd></div>' : '') + '</dl>';
+    }
+    if (asset) html += sourceImage(asset, assetLabel(asset, obsDate(chosen)));
+    if (c.state === 'missing' || c.state === 'absent') {
+      html += '<p class="inspector-note">当前报告没有这个指标。</p>' +
+        '<button type="button" class="btn" data-inspector="upload"' +
+        (importing.has(S.currentId) ? ' disabled' : '') + '>补传报告</button>';
+    }
+    if (chosen && (c.state === 'conflict' || (c.state === 'low' && chosen === c.obs))) {
+      html += '<button type="button" class="btn primary" data-pick="' + esc(chosen.id) + '">' +
+        (c.state === 'conflict' ? '以此为准' : '确认识别值') + '</button>';
+    }
+
+    var fieldValue = chosen && c.state !== 'missing' && c.state !== 'absent' ? chosen.value : '';
+    html += '<details class="manual-edit"><summary>' + (fieldValue ? '手动修正' : '手动补录') + '</summary>' +
+      '<form id="manual-result"><label for="manual-value">结果' + (ind.unit ? ' · ' + esc(ind.unit) : '') + '</label>' +
+      '<input id="manual-value" name="value" value="' + esc(fieldValue) + '" required>' +
+      '<button type="submit" class="btn">保存</button></form></details>';
+    return html;
+  }
+
+  function renderInspector() {
+    var inspector = $('#inspector');
+    var p = current();
+    var detail = p && viewOf(p.id).detail;
+    var a = detail && reportAsset(detail.assetId);
+    var ind = detail && window.Library.byId(detail.indId);
+    var visible = Boolean(a || ind);
+    if (visible) {
+      var key = p.id + ':' + (a ? a.id : ind.id);
+      if (inspector.dataset.detail === key && inspector.contains(document.activeElement) &&
+        document.activeElement.matches('input, select')) return;
+      inspector.dataset.detail = key;
+      var scroll = inspector.scrollTop;
+      inspector.innerHTML = a ? reportDetail(a) : indicatorDetail(ind, detail);
+      inspector.scrollTop = scroll;
+    }
+    inspector.hidden = !visible;
+    if (!visible) {
+      delete inspector.dataset.detail;
+      inspector.innerHTML = '';
+    }
+    $('#workbench').classList.toggle('inspector-open', visible);
+  }
+
+  function activeObservation(indId, chosenId) {
+    var c = cellState(S.currentId, indId);
+    var o = c.list.find(function (item) { return item.id === chosenId; }) || c.obs;
+    return o && (!S.dateFilter || obsDate(o) === S.dateFilter) ? o : null;
+  }
+
+  function writeManual(indId, value, observation) {
+    var o = observation;
+    if (!o) {
+      var ind = window.Library.byId(indId);
+      o = {
+        id: uid('obs'), patientId: S.currentId, assetId: null, rawName: '',
+        indicatorId: indId, unit: ind.unit, ref: ind.ref,
+        date: S.dateFilter, confidence: 1
+      };
+      S.observations.push(o);
+    }
+    o.value = value;
+    o.method = 'manual';
+    return o;
+  }
+
+  function finishReview(indId, before) {
+    var view = viewOf(S.currentId);
+    var next;
+    if (view.mode === 'review') {
+      var remaining = reviewRows(S.currentId);
+      var index = before.findIndex(function (row) { return row.id === indId; });
+      next = before.slice(index + 1).find(function (row) {
+        return remaining.some(function (item) { return item.id === row.id; });
+      }) || remaining[0];
+      view.detail = next ? { indId: next.id } : null;
+    }
     renderAll();
-    toast('已按这一份为准', 'ok');
+    if (next) $('#inspector-title').focus({ preventScroll: true });
+    else if (view.mode === 'review') $('#btn-review').focus({ preventScroll: true });
+  }
+
+  /* 冲突裁决只替换同一天的来源，保留其他就诊时间的结果。 */
+  function pickObservation(obsId) {
+    var keep = S.observations.find(function (o) { return o.id === obsId && o.patientId === S.currentId; });
+    if (!keep) return;
+    var c = cellState(S.currentId, keep.indicatorId);
+    var before = reviewRows(S.currentId);
+    if (c.state === 'conflict') {
+      var keepDate = obsDate(keep);
+      S.observations = S.observations.filter(function (o) {
+        return o === keep || o.patientId !== keep.patientId || o.indicatorId !== keep.indicatorId || obsDate(o) !== keepDate;
+      });
+    }
+    keep.method = 'manual';
+    finishReview(keep.indicatorId, before);
+    toast('已核对' + window.Library.byId(keep.indicatorId).name, 'ok');
   }
 
   /* ---------------- 指标与页面 ---------------- */
@@ -1715,7 +1967,7 @@
         '</div>';
     }
 
-    $('#modal-box').innerHTML = '<button class="modal-close" data-close="1">×</button>' + html;
+    $('#modal-box').innerHTML = '<button type="button" class="modal-close" data-close="1" aria-label="关闭">×</button>' + html;
 
     // 筛选只切行，不重画——否则输入框会丢焦点
     var s = $('#ind-search');
@@ -1893,8 +2145,8 @@
   /* ---------------- 导出 ---------------- */
 
   var STATE_NAME = {
-    ok: '已识别', low: '置信度低', missing: '必填缺失',
-    conflict: '两处不一致', absent: '未提供'
+    ok: '已识别', low: '低置信度', missing: '必填缺失',
+    conflict: '数值冲突', absent: '未提供'
   };
 
   function saveText(name, text, mime) {
@@ -1907,21 +2159,19 @@
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   }
 
-  /* 导出成结构化 JSON：给下游用（入库、二次核对、写论文附录）。
-   * 和 CSV 的区别是 CSV 只导当前患者，JSON 导全部患者并保留来源与置信度。 */
   /* 身份证、电话、地址这些直接标识符：录进来是为了"照着报告录"，
-   * 但导出去是要给别人的，所以默认抹掉。想导原值，把左侧那个勾去掉。 */
+   * 导出时按设置隐藏。 */
   var IDENT_IDS = { IDNO: 1, PHONE: 1, PHONE2: 1, ADDR: 1 };
   var HIDE_KEY = 'jiaowolu.hideIdent';
   function hideIdent() {
     try { return localStorage.getItem(HIDE_KEY) !== '0'; } catch (e) { return true; }
   }
 
-  function collectRows(pid) {
+  function collectRows(pid, date) {
     return targetIds().map(function (id) {
       var ind = window.IndicatorLib.byId(id);
       if (!ind) return null;
-      var c = cellState(pid, id);
+      var c = cellState(pid, id, date);
       var a = c.obs && c.obs.assetId
         ? S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0]
         : null;
@@ -1931,7 +2181,7 @@
       return {
         code: ind.id, name: ind.name, type: ind.type || 'num',
         value: val, unit: ind.unit || '', ref: ind.ref || '',
-        state: c.state, stateName: STATE_NAME[c.state] || '',
+        state: c.state, stateName: stateLabel(c),
         masked: masked,
         source: a ? (a.kind === 'pdf' ? '报告' + a.fileIndex + '-第' + a.pageNo + '页' : '报告' + a.fileIndex) : '',
         sourceType: a && a.reportType ? a.reportType : '',
@@ -1942,8 +2192,7 @@
     }).filter(Boolean);
   }
 
-  function exportJson() {
-    if (!S.patients.length) { toast('没有可导出的内容', 'err'); return; }
+  function exportJson(patients, filename) {
     var pages = window.Library.pages();
     var sel = loadSelected();
     var reqList = requiredIds();
@@ -1961,18 +2210,9 @@
         var ind = window.Library.byId(id);
         return { code: id, name: ind ? ind.name : id };
       }),
-      patients: S.patients.map(function (p) {
-        return {
-          code: p.code,
-          reports: assetsOf(p.id).map(function (a) {
-            return { file: a.sourceName || '', page: a.pageNo || null, type: a.reportType || '', date: a.reportDate || '' };
-          }),
-          rows: collectRows(p.id)
-        };
-      })
+      patients: patients
     };
-    saveText('交我录-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(out, null, 2));
-    toast('已导出 JSON：' + out.patients.length + ' 位患者');
+    saveText(filename + '.json', JSON.stringify(out, null, 2));
   }
 
   /* ---------------- 指标与页面的配置导入导出 ----------------
@@ -2049,52 +2289,74 @@
     inp.click();
   }
 
-  function exportCsv() {
-    var p = current();
-    if (!p) { toast('没有可导出的内容', 'err'); return; }
-    var ids = targetIds();
-    var head = ['患者', '指标代号', '指标名称', '结果', '单位', '参考范围', '状态', '来源', '报告类型', '取值方式'];
-    var stateName = STATE_NAME;
-
-    var rows = ids.map(function (id) {
-      var ind = window.IndicatorLib.byId(id);
-      var c = cellState(p.id, id);
-      var src = '';
-      var docType = '';
-      var how = '';
-      if (c.obs && c.obs.assetId) {
-        var a = S.assets.filter(function (x) { return x.id === c.obs.assetId; })[0];
-        if (a) {
-          src = a.kind === 'pdf' ? '报告' + a.fileIndex + '-第' + a.pageNo + '页' : '报告' + a.fileIndex;
-          docType = a.docType || '';
-        }
-        how = c.obs.src === 'narrative' ? '文中摘录' : '表格';
-      }
-      var val = c.obs ? c.obs.value : '';
-      if (val && IDENT_IDS[id] && hideIdent()) val = '（已隐藏）';
-      return [p.code, ind.id, ind.name, val, ind.unit, ind.ref, stateName[c.state], src, docType, how];
+  function exportCsv(patients, filename) {
+    var rows = [['患者', '指标代号', '指标名称', '结果', '单位', '参考范围', '状态', '来源', '报告类型', '取值方式']];
+    patients.forEach(function (p) {
+      p.rows.forEach(function (row) {
+        rows.push([p.code, row.code, row.name, row.value, row.unit, row.ref, row.stateName,
+          row.source, row.docType, row.source ? (row.fromNarrative ? '文中摘录' : '表格') : '']);
+      });
     });
-
-    var csv = [head].concat(rows).map(function (r) {
-      return r.map(function (v) {
-        var s = String(v == null ? '' : v);
-        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    var csv = rows.map(function (row) {
+      return row.map(function (value) {
+        var s = String(value == null ? '' : value);
+        return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
       }).join(',');
     }).join('\r\n');
+    saveText(filename + '.csv', '\ufeff' + csv, 'text/csv;charset=utf-8');
+  }
 
-    var blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = '交我录-' + p.code + '-' + new Date().toISOString().slice(0, 10) + '.csv';
-    a.click();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  function exportScopeLabel(patients, single) {
+    return single ? patients[0].code : '本批全部 ' + patients.length + ' 位患者';
+  }
+
+  var pendingExport = null;
+
+  function requestExport(format) {
+    var patient = current();
+    var scope = patient ? [patient] : S.patients;
+    if (!scope.length) return;
+    var date = patient ? S.dateFilter : '';
+    var patients = scope.map(function (p) {
+      return {
+        code: p.code,
+        reports: assetsOf(p.id).map(function (a) {
+          return { file: a.sourceName || '', page: a.pageNo || null, type: a.reportType || '', date: a.reportDate || '' };
+        }),
+        rows: collectRows(p.id, date)
+      };
+    });
+    var count = patients.reduce(function (total, p) {
+      return total + p.rows.filter(function (row) { return needsReview(row.state); }).length;
+    }, 0);
+    var label = exportScopeLabel(scope, !!patient);
+    var filename = '交我录-' + (patient ? patient.code : '全部患者') + '-' + new Date().toISOString().slice(0, 10);
+    pendingExport = { format: format, patients: patients, filename: filename, label: label };
+    if (!count) { completeExport(); return; }
+
+    $('#export-message').textContent = label + ' 还有 ' + count + ' 项待核对。可以返回核对，也可以继续导出 ' + format + '。';
+    $('#export-dialog').showModal();
+    $('#export-dialog [data-close-dialog]').focus();
+  }
+
+  function completeExport() {
+    var job = pendingExport;
+    pendingExport = null;
+    if (!job) return;
+    if (job.format === 'CSV') exportCsv(job.patients, job.filename);
+    else exportJson(job.patients, job.filename);
+    toast('已导出 ' + job.format + ' · ' + job.label, 'ok');
   }
 
   /* ---------------- 事件绑定 ---------------- */
 
   function bind() {
     $('#btn-add-patient').addEventListener('click', function () { addPatient(); });
+    $('#btn-all-patients').addEventListener('click', function () { selectPatient(null); });
+    $('#batch-overview').addEventListener('click', function (e) {
+      var target = e.target.closest('[data-pid]');
+      if (target) selectPatient(target.dataset.pid);
+    });
 
     $('#patient-list').addEventListener('click', function (e) {
       var del = e.target.closest('[data-del]');
@@ -2104,7 +2366,28 @@
         return;
       }
       var row = e.target.closest('[data-pid]');
-      if (row) { S.currentId = row.getAttribute('data-pid'); renderAll(); }
+      if (row) selectPatient(row.dataset.pid);
+    });
+
+    var rulesDialog = $('#rules-dialog');
+    var preset = $('#rule-preset');
+    var applyPreset = $('#btn-apply-rule');
+    $('#btn-rules').addEventListener('click', function () {
+      preset.replaceChildren(new Option('选择页面组', ''));
+      window.Library.groups().filter(function (group) { return group.pageIds.length; }).forEach(function (group) {
+        preset.add(new Option(group.name, group.id));
+      });
+      applyPreset.disabled = true;
+      rulesDialog.showModal();
+    });
+    preset.addEventListener('change', function () { applyPreset.disabled = !preset.value; });
+    applyPreset.addEventListener('click', function () {
+      var group = window.Library.groupById(preset.value);
+      if (!group) return;
+      selected = { ids: group.pageIds.slice(), add: [], drop: [] };
+      saveSelected();
+      renderAll();
+      applyPreset.disabled = true;
     });
 
     $('#page-checks').addEventListener('change', function (e) {
@@ -2164,6 +2447,7 @@
     });
 
     var input = $('#file-input');
+    $('#btn-upload').addEventListener('click', function () { input.click(); });
     input.addEventListener('change', function () {
       handleFiles(input.files);
       input.value = '';
@@ -2180,81 +2464,103 @@
       dropInput.click();
     });
 
-    var dz = $('#dropzone');
+    var dropTarget = $('#patient-work');
     ['dragenter', 'dragover'].forEach(function (ev) {
-      dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.add('over'); });
+      dropTarget.addEventListener(ev, function (e) {
+        if (!e.dataTransfer.types.includes('Files')) return;
+        e.preventDefault();
+        dropTarget.classList.add('over');
+      });
     });
-    ['dragleave', 'drop'].forEach(function (ev) {
-      dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.remove('over'); });
+    dropTarget.addEventListener('dragleave', function (e) {
+      if (!e.relatedTarget || !dropTarget.contains(e.relatedTarget)) dropTarget.classList.remove('over');
     });
-    dz.addEventListener('drop', function (e) {
+    dropTarget.addEventListener('drop', function (e) {
+      e.preventDefault();
+      dropTarget.classList.remove('over');
       if (e.dataTransfer && e.dataTransfer.files) handleFiles(e.dataTransfer.files);
+    });
+
+    $('#report-summary').addEventListener('click', function () {
+      viewOf(S.currentId).reportsOpen = !$('#report-list').open;
+    });
+    ['review', 'all'].forEach(function (mode) {
+      $(mode === 'review' ? '#btn-review' : '#btn-results-all').addEventListener('click', function () {
+        var view = viewOf(S.currentId);
+        view.mode = mode;
+        view.modeChosen = true;
+        try { localStorage.setItem('jiaowolu.startView', mode); } catch (e) { /* 忽略 */ }
+        if (view.detail && view.detail.indId && mode === 'review' &&
+          !needsReview(cellState(S.currentId, view.detail.indId).state)) view.detail = null;
+        renderTable();
+        renderInspector();
+      });
     });
 
     // 表格：改值 / 看来源
     $('#grid-body').addEventListener('input', function (e) {
       var inp = e.target.closest('.val-input');
       if (!inp) return;
-      var p = current();
       var id = inp.getAttribute('data-ind');
-      var c = cellState(p.id, id);
-      var o = c.obs;
-      if (!o) {
-        var ind = window.IndicatorLib.byId(id);
-        o = {
-          id: uid('obs'), patientId: p.id, assetId: null, rawName: '',
-          indicatorId: id, method: 'manual', value: '', unit: ind.unit, ref: ind.ref,
-          date: '', confidence: 1
-        };
-        S.observations.push(o);
-      }
-      o.value = inp.value;
-      o.method = 'manual';
+      writeManual(id, inp.value, activeObservation(id));
       var row = inp.closest('tr');
-      var st = cellState(p.id, id).state;
-      row.className = st;
-      row.querySelector('.ind-dot').className = 'ind-dot ' + st;
+      var c = cellState(S.currentId, id);
+      row.className = c.state + (row.classList.contains('selected-result') ? ' selected-result' : '');
+      row.querySelector('.ind-dot').className = 'ind-dot ' + c.state;
+      row.querySelector('.cell-state').innerHTML = badgeOf(c);
       renderStats();
+      renderPatients();
+      cacheSchedule();
+    });
+    $('#grid-body').addEventListener('change', function (e) {
+      if (e.target.matches('.val-input')) renderInspector();
     });
 
     $('#grid-body').addEventListener('click', function (e) {
       var g = e.target.closest('.group-row');
       if (g) {
-        var pid = g.getAttribute('data-page');
-        S.collapse[pid] = !S.collapse[pid];
+        var pid = g.dataset.page;
+        S.collapse[pid] = g.querySelector('.group-toggle').getAttribute('aria-expanded') === 'true';
         renderTable();
+        $('.group-row[data-page="' + CSS.escape(pid) + '"] button').focus({ preventScroll: true });
         return;
       }
       var cmp = e.target.closest('[data-cmp]');
       if (cmp) { openCompare(cmp.getAttribute('data-cmp')); return; }
-      var b = e.target.closest('[data-src]');
-      if (b) openSource(b.getAttribute('data-src'));
     });
 
     $('#date-bar').addEventListener('click', function (e) {
       var chip = e.target.closest('.date-chip');
       if (!chip) return;
       S.dateFilter = chip.getAttribute('data-date') || '';
+      viewOf(S.currentId).date = S.dateFilter;
       renderDateBar();
+      renderStats();
       renderTable();
+      renderInspector();
+      $('.date-chip.on').focus({ preventScroll: true });
     });
 
     $('#asset-strip').addEventListener('click', function (e) {
+      var retry = e.target.closest('[data-retry]');
+      if (retry) { retryOne(reportAsset(retry.dataset.retry)); return; }
       var a = e.target.closest('[data-aid]');
-      if (!a) return;
-      var aid = a.getAttribute('data-aid');
-      var asset = S.assets.filter(function (x) { return x.id === aid; })[0];
-      // 失败的那一份，点一下就单独重试它，不用整批重跑
-      if (asset && asset.status !== 'done' && asset.status !== 'running') {
-        retryOne(asset);
-        return;
-      }
-      openSource(aid);
+      if (a) openSource(a.dataset.aid);
     });
 
     $('#btn-run').addEventListener('click', runRecognize);
-    $('#btn-export').addEventListener('click', exportCsv);
-    $('#btn-export-json').addEventListener('click', exportJson);
+    $('#btn-export').addEventListener('click', function () { requestExport('CSV'); });
+    $('#btn-export-json').addEventListener('click', function () { requestExport('JSON'); });
+    $('#btn-confirm-export').addEventListener('click', function () {
+      $('#export-dialog').close();
+      completeExport();
+    });
+    $('#export-dialog').addEventListener('close', function () {
+      if (!this.open) pendingExport = null;
+    });
+    $$('[data-close-dialog]').forEach(function (button) {
+      button.addEventListener('click', function () { button.closest('dialog').close(); });
+    });
     var chkHide = $('#chk-hide-ident');
     if (chkHide) {
       chkHide.checked = hideIdent();
@@ -2276,11 +2582,54 @@
         });
       });
     }
-    $('#btn-library').addEventListener('click', function () { openLibrary('ind'); });
+    $('#btn-library').addEventListener('click', function () { rulesDialog.close(); openLibrary('ind'); });
+
+    $('#inspector').addEventListener('click', function (e) {
+      var button = e.target.closest('button');
+      if (!button) return;
+      var view = viewOf(S.currentId);
+      var detail = view.detail;
+      if (button.dataset.inspector === 'close') {
+        view.detail = null;
+        renderTable();
+        renderInspector();
+        var trigger = detail.indId ? $('.indicator-link[data-cmp="' + CSS.escape(detail.indId) + '"]') :
+          $('[data-aid="' + CSS.escape(detail.assetId) + '"]');
+        if (trigger) trigger.focus({ preventScroll: true });
+      } else if (button.dataset.inspector === 'upload') {
+        input.click();
+      } else if (button.dataset.observation) {
+        detail.observationId = button.dataset.observation;
+        renderInspector();
+        $('[data-observation="' + CSS.escape(detail.observationId) + '"]').focus({ preventScroll: true });
+      } else if (button.dataset.pick) {
+        pickObservation(button.dataset.pick);
+      } else if (button.dataset.zoom) {
+        var asset = reportAsset(button.dataset.zoom);
+        if (asset) openModal('<h3>' + esc(assetLabel(asset, asset.reportDate)) + '</h3>' +
+          '<img class="source-img" src="' + esc(asset.dataUrl) + '" alt="报告原图">', 'wide');
+      } else if (button.id === 'src-retype') {
+        var report = reportAsset(detail.assetId);
+        if (!report || S.running || report.lowRes) return;
+        if (!window.Model.getConfig().hasKey) { openSettings(); return; }
+        report.docType = $('#src-type').value;
+        report.typeForced = true;
+        report.status = 'pending';
+        retryOne(report);
+      }
+    });
+
+    $('#inspector').addEventListener('submit', function (e) {
+      if (e.target.id !== 'manual-result') return;
+      e.preventDefault();
+      var field = $('#manual-value');
+      if (!field.value.trim()) { field.focus(); return; }
+      var detail = viewOf(S.currentId).detail;
+      var o = writeManual(detail.indId, field.value.trim(), activeObservation(detail.indId, detail.observationId));
+      pickObservation(o.id);
+    });
 
     $('#modal-box').addEventListener('click', function (e) {
-      var pick = e.target.closest('[data-pick]');
-      if (pick) { pickObservation(pick.getAttribute('data-pick')); return; }
       if (e.target.closest('[data-act]') || e.target.closest('[data-tab]')) handleLibraryClick(e);
     });
 
@@ -2290,6 +2639,8 @@
       S.observations = [];
       S.patients = [];
       S.currentId = null;
+      S.seq = { patient: 0, asset: 0, obs: 0 };
+      patientViews.clear();
       window.Model.resetUsage();
       cacheClear();
       addPatient(true);
@@ -2303,6 +2654,8 @@
 
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && !$('#modal').hidden) closeModal();
+      else if (e.key === 'Escape' && !$('#inspector').hidden &&
+        !$('#rules-dialog').open && !$('#export-dialog').open) $('#inspector [data-inspector="close"]').click();
     });
   }
 
@@ -2388,6 +2741,7 @@
     }
 
     if (!S.patients.length) addPatient(true);
+    else if (S.currentId) S.collapse = viewOf(S.currentId).collapse;
     bind();
     updatePill();
     renderAll();

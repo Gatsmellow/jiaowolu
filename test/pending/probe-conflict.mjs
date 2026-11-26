@@ -108,7 +108,7 @@ async function main() {
     await cdp.send('Page.navigate', { url: APP });
     await cdp.waitForLoad();
     await cdp.eval(`
-      localStorage.setItem('jiaowolu.apiKey', ${JSON.stringify(key)});
+      localStorage.setItem('jiaowolu.startView','all');localStorage.setItem('jiaowolu.apiKey', ${JSON.stringify(key)});
       localStorage.setItem('jiaowolu.modelConfig', JSON.stringify({base:'https://api.deepseek.com', model:'deepseek-flash'}));
       localStorage.removeItem('jiaowolu.selectedPages.v3');
       'ok'
@@ -207,7 +207,7 @@ async function main() {
     console.log('[5/5] 检查页面异常');
     console.log('    ' + (cdp.errors.length ? String(cdp.errors[0]).split('\n')[0] : '无'));
 
-    const ok = row && row.src.indexOf('/') !== -1
+    const ok = row && (row.src.indexOf('/') !== -1 || row.src.indexOf('个来源') !== -1)
       && Array.isArray(cmp) && cmp.length === 2;
     if (!ok) {
       console.error('\n不通过：冲突没有把两个来源都列出来');

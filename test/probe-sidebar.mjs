@@ -108,7 +108,11 @@ try {
   if (state.patients !== 6) problems.push(`患者数 ${state.patients}，应为 6`);
   if (!state.hitIsButton) problems.push(`按钮中心点落到了 ${state.hitTag}，被别的元素盖住了`);
   if (state.overlappingRun) problems.push('「添加患者」和「开始识别」在垂直方向重叠');
-  if (!state.listScrolls) problems.push('患者列表没有出现内部滚动，说明还在把下面的按钮顶出去');
+  // 新版左栏是患者队列，6 位患者时列表整体放得下（不滚动）是正常的；
+  // 只要「添加患者」没有被顶出可视区、能点中、和「开始识别」不重叠即可。
+  if (!state.listScrolls && state.listScroll > state.listClient + 1) {
+    problems.push('患者列表溢出却没有内部滚动，下面的按钮会被顶出去');
+  }
   if (state.activeVisible === false) problems.push('刚添加的「患者 06」落在列表可视区外，看着像没加上');
 
   const shot = await send('Page.captureScreenshot', { format: 'png' });

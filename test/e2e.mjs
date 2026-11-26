@@ -196,6 +196,25 @@ async function main() {
     }
 
     console.log('[5/6] 读表格');
+    // 界面默认停在"待核对"（只渲染需要处理的行）；统计前先切到"全部结果"，
+    // 并把折叠着的分组展开，否则数出来的行数是少的。
+    await cdp.eval(`
+      (function () {
+        var tab = document.getElementById('btn-results-all');
+        if (tab) tab.click();
+        return 'all';
+      })()
+    `);
+    await sleep(400);
+    await cdp.eval(`
+      (function () {
+        var collapsed = Array.from(document.querySelectorAll('#grid-body .group-row'))
+          .filter(function (el) { return el.getAttribute('aria-expanded') === 'false'; });
+        collapsed.forEach(function (el) { el.click(); });
+        return collapsed.length;
+      })()
+    `);
+    await sleep(400);
     const assetInfo = await cdp.eval('window.__S.assets.map(a => ({idx: a.fileIndex, st: a.status, err: a.error || ""}))');
     console.log('    资产状态：', JSON.stringify(assetInfo));
     const rows = await cdp.eval(`

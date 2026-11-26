@@ -83,7 +83,7 @@ async function main() {
     await cdp.send('Page.navigate', { url: APP });
     await sleep(1200);
 
-    await cdp.eval(`localStorage.setItem('jiaowolu.apiKey', ${JSON.stringify(key)});
+    await cdp.eval(`localStorage.setItem('jiaowolu.startView','all');localStorage.setItem('jiaowolu.apiKey', ${JSON.stringify(key)});
       localStorage.setItem('jiaowolu.modelConfig', JSON.stringify({base:'https://api.deepseek.com', model:'deepseek-flash'}));
       localStorage.removeItem('jiaowolu.selectedPages.v2'); 'ok'`);
     await cdp.send('Page.reload');

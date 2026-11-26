@@ -79,8 +79,10 @@ const PILLS = `(function () {
 })()`;
 const SEL = `(function () {
   var s = JSON.parse(localStorage.getItem('jiaowolu.selectedPages.v4') || '{}');
-  var sub = document.getElementById('patient-sub') ? document.getElementById('patient-sub').textContent : '';
-  var m = /其中必填 (\\d+) 项/.exec(sub);
+  // 新版把"本次生效必填"的数量显示在顶部规则条上（#rule-summary，形如"常规页面组 7 个页面 · 33 项必填"），
+  // 右下角的 #patient-sub 已经改成了"N 页报告 · 状态"，不再带必填数。
+  var rule = document.getElementById('rule-summary') ? document.getElementById('rule-summary').textContent : '';
+  var m = /(\\d+) 项必填/.exec(rule);
   return { pages: (s.ids || []).length, add: (s.add || []).length, drop: (s.drop || []).length, req: m ? Number(m[1]) : null };
 })()`;
 
