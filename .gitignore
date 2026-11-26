@@ -6,6 +6,7 @@ secrets/
 # 临时产物
 tmp_real/
 req_slices/
+ext/
 runs/
 *.log
 __pycache__/
