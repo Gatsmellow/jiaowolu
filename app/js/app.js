@@ -546,6 +546,31 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
         if (tab.some(function (o) { return !sameValue(o.value, first.value, isNum); })) conflictList = tab;
       }
     });
+
+    // 没有化验单、只有叙述时，同一份报告里可能提到同一项好几次（不同化疗周期）。
+    // 这种情况不能静默挑一个：读对了也可能取错了那一次。用原始观测（未按报告去重）判断。
+    var multiList = (function () {
+      var tableDates = {};
+      all.forEach(function (o) { if (o.src !== 'narrative') tableDates[obsDate(o)] = 1; });
+      var groups = {};
+      list.forEach(function (o) {
+        if (o.src !== 'narrative') return;
+        if (String(o.value == null ? '' : o.value).trim() === '') return;
+        var d = obsDate(o);
+        if (dateFilter && d !== dateFilter) return;
+        if (tableDates[d]) return;             // 那天有化验单，以表格为准，叙述里的多值不用管
+        var k = (o.assetId || '-') + '|' + d;
+        (groups[k] = groups[k] || []).push(o);
+      });
+      var found = null;
+      Object.keys(groups).forEach(function (k) {
+        var g = groups[k];
+        var uniq = {};
+        g.forEach(function (o) { uniq[String(o.value).trim()] = 1; });
+        if (Object.keys(uniq).length > 1 && !found) found = g;
+      });
+      return found;
+    })();
     if (conflictList) {
       return { state: 'conflict', obs: conflictList[0], list: conflictList, dates: dates };
     }
@@ -558,6 +583,15 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
     });
     var o = sorted[0];
     var extra = { obs: o, list: sorted, dates: dates };
+
+    if (multiList) {
+      // 同一份叙述里读到多个不同值：让人挑，不替他决定
+      extra.state = 'low';
+      extra.multi = true;
+      extra.list = multiList;
+      extra.obs = multiList[multiList.length - 1];   // 默认高亮最后出现的那次
+      return extra;
+    }
 
     if (o.warn === 'unit' && o.method !== 'manual') {
       // 项目认出来了，但单位跟标准库不是一类（比如报告用 mg/dL、库里是 mmol/L）。
@@ -669,6 +703,7 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
         st = '<span class="asset-state err" title="' + esc(a.error || '') + '">失败</span>';
       } else st = '<span class="asset-state">待识别</span>';
       if (a.lowRes) st = '<span class="asset-state err" title="长边 ' + Math.max(a.width, a.height) + ' 像素，太小，读不出小字">图太小</span>';
+      else if (a.soft) st = '<span class="asset-state stale" title="这张图偏模糊（清晰度 ' + (a.sharp || 0) + '），小字容易读错，建议换清晰的原图">偏模糊</span>';
       return '<div class="report-item"><button type="button" class="asset' + (a.lowRes ? ' lowres' : '') +
         '" data-aid="' + esc(a.id) + '" title="' + esc(a.name) + '">' +
         '<img src="' + esc(a.dataUrl) + '" alt="" loading="lazy">' +
@@ -738,6 +773,7 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
   }
 
   function stateLabel(c) {
+    if (c.multi) return '同一页多个值';
     if (c.state === 'ok' && c.obs && c.obs.method === 'manual') return '人工已核对';
     if (c.state === 'low' && c.obs && c.obs.warn === 'unit') return '单位待确认';
     return STATE_NAME[c.state] || '';
@@ -816,6 +852,7 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
         var c = row.c;
         var detail = '';
         if (c.state === 'missing') detail = '本次必填，当前报告中未找到。';
+        else if (c.multi) detail = '同一份报告里读到 ' + c.list.length + ' 处，取值不一致，请挑一处。';
         else if (c.state === 'low') detail = '识别为“' + ((c.obs && c.obs.value) || '') + '”，请对照原图确认。';
         else detail = (c.list || []).map(function (o) { return o.value; })
           .filter(function (v, i, all) { return all.indexOf(v) === i; }).join(' / ');
@@ -1092,11 +1129,41 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
         ctx.fillStyle = '#fff';
         ctx.fillRect(0, 0, w, h);
         ctx.drawImage(img, 0, 0, w, h);
-        resolve({ dataUrl: c.toDataURL('image/jpeg', JPEG_QUALITY), width: w, height: h });
+        resolve({ dataUrl: c.toDataURL('image/jpeg', JPEG_QUALITY), width: w, height: h, sharp: photoSharpness(c) });
       };
       img.onerror = function () { reject(new Error('这张图片打不开，可能已损坏')); };
       img.src = dataUrl;
     });
+  }
+
+  /* 图片够不够清楚：把图缩到 400 宽，算拉普拉斯响应的方差。
+     干净扫描件在一两千以上，拍糊的、对着屏幕拍的会掉到几百。
+     只用来提示"这张照片可能看不清"，不阻断识别。 */
+  var SOFT_MIN = 1500;
+  function photoSharpness(srcCanvas) {
+    try {
+      var w = 400;
+      var h = Math.max(1, Math.round(srcCanvas.height * w / srcCanvas.width));
+      var cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      var cx = cv.getContext('2d', { willReadFrequently: true });
+      cx.drawImage(srcCanvas, 0, 0, w, h);
+      var d = cx.getImageData(0, 0, w, h).data;
+      var g = new Float32Array(w * h);
+      for (var i = 0; i < w * h; i++) g[i] = d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114;
+      var sum = 0, sum2 = 0, n = 0;
+      for (var y = 1; y < h - 1; y++) {
+        for (var x = 1; x < w - 1; x++) {
+          var v = 4 * g[y * w + x] - g[(y - 1) * w + x] - g[(y + 1) * w + x] - g[y * w + x - 1] - g[y * w + x + 1];
+          sum += v; sum2 += v * v; n++;
+        }
+      }
+      if (!n) return 0;
+      var mean = sum / n;
+      return Math.round(sum2 / n - mean * mean);
+    } catch (e) {
+      return 0;
+    }
   }
 
   async function ingestImage(file, fileIndex, pid) {
@@ -1114,6 +1181,8 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
       width: small.width,
       height: small.height,
       lowRes: edge < MIN_EDGE,
+      soft: (small.sharp || 0) < SOFT_MIN,
+      sharp: small.sharp || 0,
       status: 'pending',
       error: ''
     };
@@ -1179,6 +1248,7 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
       return Math.max(m, a.fileIndex || 0);
     }, 0);
     var smallCount = 0;
+    var softCount = 0;
     renderAll();
     try {
       for (var f of list) {
@@ -1195,6 +1265,7 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
           fileIndex++;
           S.assets.push.apply(S.assets, pages);
           smallCount += pages.filter(function (page) { return page.lowRes; }).length;
+          softCount += pages.filter(function (page) { return page.soft && !page.lowRes; }).length;
           cacheSchedule();
         } catch (e) {
           toast(e.message || String(e), 'err');
@@ -1207,6 +1278,9 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
     if (smallCount) {
       toast('有 ' + smallCount + ' 张图的长边不到 ' + MIN_EDGE + ' 像素（像是聊天里存下来的缩略图）。' +
         '这个尺寸连印刷体都读不清，模型只会给出低置信度的结果。请换成原图或重新拍照。', 'err');
+    } else if (softCount) {
+      toast('有 ' + softCount + ' 张图比较模糊（可能是拍屏幕、手抖或压缩过）。' +
+        '模糊的图容易把相邻的两位数字读混，建议换清晰的原图或扫描件；先用也可以，核对时多看原图。', 'err');
     }
   }
 
@@ -1744,9 +1818,10 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
         '<button type="button" class="btn" data-inspector="upload"' +
         (importing.has(S.currentId) ? ' disabled' : '') + '>补传报告</button>';
     }
-    if (chosen && (c.state === 'conflict' || (c.state === 'low' && chosen === c.obs))) {
-      html += '<button type="button" class="btn primary" data-pick="' + esc(chosen.id) + '">' +
-        (c.state === 'conflict' ? '以此为准' : '确认识别值') + '</button>';
+    if (chosen && (c.state === 'conflict' || c.state === 'low')) {
+      var pickLabel = c.state === 'conflict' ? '以此为准'
+        : (chosen === c.obs ? '确认识别值' : '以这一处为准');
+      html += '<button type="button" class="btn primary" data-pick="' + esc(chosen.id) + '">' + pickLabel + '</button>';
     }
 
     var fieldValue = chosen && c.state !== 'missing' && c.state !== 'absent' ? chosen.value : '';
@@ -1797,6 +1872,7 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
     'manual-add': '人工补录',
     'low-confirm': '低置信确认',
     'conflict-pick': '冲突裁决',
+    'multi-pick': '同页多值择一',
     'confirm': '人工确认'
   };
   function obsSourceText(o) {
@@ -1877,9 +1953,11 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
     var c = cellState(S.currentId, keep.indicatorId);
     var before = reviewRows(S.currentId);
     var beforeValue = c.obs ? String(c.obs.value == null ? '' : c.obs.value) : '';
-    var action = c.state === 'conflict' ? 'conflict-pick' : (c.state === 'low' ? 'low-confirm' : 'confirm');
+    var action = c.state === 'conflict' ? 'conflict-pick'
+      : (c.state === 'low' ? (c.multi ? 'multi-pick' : 'low-confirm') : 'confirm');
     var dropped = [];
-    if (c.state === 'conflict') {
+    var isMulti = c.state === 'low' && c.multi;
+    if (c.state === 'conflict' || isMulti) {
       var keepDate = obsDate(keep);
       dropped = S.observations.filter(function (o) {
         return o !== keep && o.patientId === keep.patientId && o.indicatorId === keep.indicatorId && obsDate(o) === keepDate;
@@ -3285,6 +3363,8 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
   window.__docPages = docPages;
   window.__candidatesFor = candidatesFor;
   window.__targetIds = targetIds;
+  window.__photoSharpness = photoSharpness;
+  window.__SOFT_MIN = SOFT_MIN;
     window.__parseJson = parseJson;
   }
 
