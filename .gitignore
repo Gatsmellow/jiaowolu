@@ -6,7 +6,8 @@ secrets/
 # 临时产物
 tmp_real/
 req_slices/
-ext/
+# ext/ 是要入库的（协作者产出的文档、素材），只有 ext/tmp/ 是随手丢的临时区
+ext/tmp/
 runs/
 *.log
 __pycache__/
