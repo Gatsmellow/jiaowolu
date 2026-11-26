@@ -189,6 +189,10 @@ async function main() {
       want(rep[0] && rep[0].type === '血常规', '报告类型没有导出（拿到 ' + (rep[0] && rep[0].type) + '）');
       want(rep[0] && rep[0].page === 1 && rep[0].date === '2026-11-10', '报告页码/日期没有导出');
       want(Array.isArray(doc.reviewHistory), 'JSON 里没有 reviewHistory 字段');
+      // 整份 JSON 扫一遍：任何一个字段（包括报告元数据、复核历史）都不该留下直接标识符
+      const whole = JSON.stringify(doc);
+      want(whole.indexOf('张建国') < 0, '整份 JSON 里仍然出现了姓名原文');
+      want(whole.indexOf('310101199001011234') < 0, '整份 JSON 里仍然出现了身份证原文');
     }
 
     console.log('[3/5] 脱敏开启时导出 CSV');
@@ -241,6 +245,10 @@ async function main() {
     want(pick && String(pick.dropped[0]).indexOf('7.24') >= 0, 'dropped 里没有记下被否决的那个值');
     want(pick && pick.after === '9.99', '复核历史里的新值不对（拿到 ' + (pick && pick.after) + '）');
     want(pick && pick.operator === '本机操作', '没有账号体系时应记为"本机操作"');
+    // 复核历史里也不许留下标识符（姓名可能在 before/after 里出现过）
+    const histText = JSON.stringify(doc);
+    want(histText.indexOf('张建国') < 0, '导出 JSON 的复核历史里出现了姓名原文');
+    want(histText.indexOf('310101199001011234') < 0, '导出 JSON 的复核历史里出现了身份证原文');
 
     console.log('[5/5] 脱敏关闭时导出 JSON');
     await cdp.eval('localStorage.setItem("jiaowolu.hideIdent","0"); "ok"');

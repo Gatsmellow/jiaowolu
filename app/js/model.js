@@ -65,6 +65,9 @@
       var j = JSON.parse(body);
       detail = (j.error && (j.error.message || j.error.type)) || j.message || '';
     } catch (e) { detail = String(body || '').slice(0, 120); }
+    // 服务商的报错正文偶尔会把请求内容回显出来。这里把长数字串抹掉，
+    // 免得身份证号、手机号顺着"调用失败：..."出现在提示条或被导出的错误日志里。
+    detail = String(detail).replace(/\d{11,}/g, '***').slice(0, 160);
 
     if (status === 401) return 'API Key 无效或已过期，请在"设置"里重新填写。';
     if (status === 402) return '账号余额不足。';
@@ -75,13 +78,14 @@
     return '调用失败（HTTP ' + status + '）' + (detail ? '：' + detail : '');
   }
 
-  /* 发一次带图片的对话请求。
-   * @param {string} dataUrl  data:image/jpeg;base64,... 形式的页面图片
-   * @param {string} prompt   抽取指令
+  /* 发一次对话请求。有图就走视觉结构，没图只发文字。
+   * 错误处理、重试、用量统计都只在这一处，避免另写一套缺胳膊少腿的 fetch。
+   * @param {string} content  data:image/jpeg;base64,... 形式的页面图片；空串表示纯文本请求
+   * @param {string} prompt   指令
    * @param {object} opt      {maxTokens, signal, json}
    * @returns {Promise<{text, usage, ms}>}
    */
-  async function vision(dataUrl, prompt, opt) {
+  async function request(content, prompt, opt) {
     opt = opt || {};
     if (!cfg.apiKey) throw new Error('还没有填写 API Key。点右上角"设置"填一个，只保存在这台电脑的浏览器里。');
 
@@ -91,10 +95,10 @@
       max_tokens: opt.maxTokens || 2400,
       messages: [{
         role: 'user',
-        content: [
+        content: content ? [
           { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: dataUrl } }
-        ]
+          { type: 'image_url', image_url: { url: content } }
+        ] : [{ type: 'text', text: prompt }]
       }]
     };
     if (opt.json !== false) body.response_format = { type: 'json_object' };
@@ -149,8 +153,9 @@
 
     if (!text.trim()) {
       var e1 = new Error(finish === 'length'
-        ? '模型的输出额度在思考阶段就用完了（不是图片的问题），换更大的额度重试。'
-        : '模型返回了空内容。图片可能太小或太模糊，也可能是这个模型不支持图片输入。');
+        ? '模型的输出额度在思考阶段就用完了，换更大的额度重试。'
+        : (content ? '模型返回了空内容。图片可能太小或太模糊，也可能是这个模型不支持图片输入。'
+                   : '模型返回了空内容，请重试或换一个模型。'));
       e1.code = finish === 'length' ? 'truncated' : 'empty';
       throw e1;
     }
@@ -162,6 +167,15 @@
       throw e2;
     }
     return { text: text, usage: u, ms: ms };
+  }
+
+  function vision(dataUrl, prompt, opt) {
+    return request(dataUrl, prompt, opt);
+  }
+
+  /* 纯文本请求：一句话质控任务用这个。 */
+  function text(prompt, opt) {
+    return request('', prompt, opt);
   }
 
   function getUsage() {
@@ -178,6 +192,7 @@
     getConfig: getConfig,
     setConfig: setConfig,
     vision: vision,
+    text: text,
     getUsage: getUsage,
     resetUsage: resetUsage,
     DEFAULTS: { base: DEFAULT_BASE, model: DEFAULT_MODEL }

@@ -979,3 +979,44 @@ table.mini-grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* ---------- 初评稳妥版：一句话任务与待办行动 ---------- */
+.task-dialog { width: min(680px, calc(100vw - 32px)); }
+.task-dialog textarea {
+  width: 100%; resize: vertical; min-height: 104px; margin: 8px 0;
+  border: 1px solid var(--line-strong); border-radius: 8px; padding: 12px;
+  color: var(--ink); background: var(--card); font: inherit; line-height: 1.6;
+}
+.task-dialog textarea:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.task-preview { margin-top: 12px; }
+.task-preview:not(:empty) { border-top: 1px solid var(--line); padding-top: 12px; }
+.task-preview h3 { margin: 0 0 8px; }
+.task-preview p { margin: 6px 0; }
+.task-warnings { padding: 10px 12px; background: var(--amber-soft); color: var(--amber); border-radius: 8px; }
+.task-warnings ul { margin: 6px 0 0; padding-left: 20px; }
+.task-error { color: var(--red); margin: 8px 0; }
+#btn-task-ai { margin: 8px 0 4px; }
+
+.action-queue { margin: 12px 0 4px; border-top: 1px solid var(--line); }
+.action-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 0 8px; }
+.action-heading strong { font-size: 17px; }
+.action-heading span, .action-more { color: var(--muted); font-size: 12px; }
+.action-item {
+  width: 100%; display: grid; grid-template-columns: 76px minmax(100px, .7fr) minmax(160px, 1.5fr) 64px;
+  align-items: center; gap: 12px; min-height: 52px; padding: 10px 4px;
+  border: 0; border-bottom: 1px solid var(--line); background: transparent;
+  color: var(--ink); text-align: left; font: inherit; cursor: pointer;
+}
+.action-item:hover { background: var(--chrome); }
+.action-item:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.action-kind { font-weight: 650; }
+.action-item.conflict .action-kind, .action-item.missing .action-kind { color: var(--red); }
+.action-item.low .action-kind { color: var(--amber); }
+.action-name { font-weight: 600; }
+.action-detail { color: var(--muted); overflow-wrap: anywhere; }
+.action-go { color: var(--blue); text-align: right; }
+@media (max-width: 700px) {
+  .action-item { grid-template-columns: 70px 1fr 54px; gap: 8px; }
+  .action-detail { grid-column: 1 / -1; }
+  .action-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
+}

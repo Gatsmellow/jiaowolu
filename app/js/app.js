@@ -17,6 +17,8 @@
   var PDF_MAX_PAGES = 12;      // 一次最多拆 12 页
   var CONCURRENCY = 2;         // 同时识别几页
   var LOW_CONFIDENCE = 0.6;
+/* 报告上用这些符号表示"这一项没做/无结果"，不是数值 */
+var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未查|无|未见)$/;
 
   /* 文书类型 → 只有这类文书上才会成组出现的页面。
      先判类型再抽取，是为了不让模型到出院记录的正文里去"捞"血常规——
@@ -793,7 +795,37 @@
       S.observations.some(function (o) { return o.patientId === pid; });
   }
 
+  /* 待核对行动队列：数据全部来自 reviewRows()/cellState()，不新增第二份状态。
+   * 只列"需要人处理"的三类，最多 6 条，其余指向下方完整表格。 */
+  function renderActionQueue() {
+    var box = $('#action-queue');
+    if (!box) return;
+    var p = current();
+    var review = p && viewOf(p.id).mode === 'review';
+    var rows = p && review && hasResults(p.id) ? reviewRows(p.id) : [];
+    box.hidden = !rows.length;
+    if (!rows.length) { box.innerHTML = ''; return; }
+    var labels = { conflict: '需要裁决', missing: '需要补录', low: '需要确认' };
+    box.innerHTML = '<div class="action-heading"><strong>还有 ' + rows.length + ' 项需要处理</strong>' +
+      '<span>先看问题，再看完整表格</span></div>' + rows.slice(0, 6).map(function (row) {
+        var ind = window.Library.byId(row.id);
+        var c = row.c;
+        var detail = '';
+        if (c.state === 'missing') detail = '本次必填，当前报告中未找到。';
+        else if (c.state === 'low') detail = '识别为“' + ((c.obs && c.obs.value) || '') + '”，请对照原图确认。';
+        else detail = (c.list || []).map(function (o) { return o.value; })
+          .filter(function (v, i, all) { return all.indexOf(v) === i; }).join(' / ');
+        return '<button type="button" class="action-item ' + c.state + '" data-action-ind="' + esc(row.id) + '">' +
+          '<span class="action-kind">' + labels[c.state] + '</span>' +
+          '<span class="action-name">' + esc(ind ? ind.name : row.id) + '</span>' +
+          '<span class="action-detail">' + esc(detail) + '</span>' +
+          '<span class="action-go">核对 →</span></button>';
+      }).join('') + (rows.length > 6
+        ? '<p class="action-more">其余 ' + (rows.length - 6) + ' 项见下方待核对表。</p>' : '');
+  }
+
   function renderTable() {
+    renderActionQueue();
     var body = $('#grid-body');
     var p = current();
     if (!p) return;
@@ -1381,6 +1413,9 @@
         return;
       }
       var v = it.value == null ? '' : String(it.value).trim();
+      // 报告上常把"这一项没做/无结果"印成 —、-、/ 之类的占位符。
+      // 当成数值录进去会让"必填缺失"漏报，所以这里直接不产生观测值。
+      if (PLACEHOLDER_VALUES.test(v)) return;
       var unit = it.unit || '';
       var ind0 = window.Library.byId(hit.id);
       if (!ind0 || (ind0.type || 'num') === 'num') {
@@ -2252,7 +2287,7 @@
    * 姓名、身份证、电话、其他联系方式、地址，都是"看见就知道是谁"的字段；
    * 住院号也纳入——它在医院范围内能直接对应到个人，而导出表里已经有
    * "患者 01"这样的批次内编号，不影响核对。 */
-  var IDENT_IDS = { NAME: 1, IDNO: 1, PHONE: 1, PHONE2: 1, ADDR: 1, ADMNO: 1 };
+  var IDENT_IDS = { NAME: 1, ADMNO: 1, IDNO: 1, PHONE: 1, PHONE2: 1, ADDR: 1, HUKOU: 1 };
   var MASK_TEXT = '（已隐藏）';
   var HIDE_KEY = 'jiaowolu.hideIdent';
   function hideIdent() {
@@ -2476,7 +2511,7 @@
         code: p.code,
         reports: assetsOf(p.id).map(function (a) {
           return {
-            file: maskText(a.name || '', secrets),
+            file: maskText(a.name || a.sourceName || '', secrets),
             page: a.pageNo || null,
             // docType 是本地判型结果，reportType 是模型在抽取时回报的类型，
             // 两个都有时以本地判型为准（用户可以在设置里手动改 docType）
@@ -2549,6 +2584,92 @@
       saveSelected();
       renderAll();
       applyPreset.disabled = true;
+    });
+
+    /* ---------------- 一句话质控任务：AI 提案，本地校验，人工确认 ---------------- */
+    var pendingTaskPlan = null;
+    var taskDialog = $('#task-dialog');
+
+    function resetTaskDialog() {
+      pendingTaskPlan = null;
+      $('#task-preview').innerHTML = '';
+      $('#btn-task-apply').disabled = true;
+    }
+
+    $('#btn-task-ai').addEventListener('click', function () {
+      resetTaskDialog();
+      if (rulesDialog.open) rulesDialog.close();
+      taskDialog.showModal();
+      $('#task-requirement').focus();
+    });
+
+    $$('[data-close-task]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        // 关闭/取消只是放弃这次预览，绝不碰已有的 selected
+        resetTaskDialog();
+        taskDialog.close();
+      });
+    });
+
+    $('#btn-task-generate').addEventListener('click', async function () {
+      var button = this;
+      var requirement = $('#task-requirement').value.trim();
+      button.disabled = true;
+      button.textContent = '正在生成…';
+      $('#btn-task-apply').disabled = true;
+      pendingTaskPlan = null;
+      $('#task-preview').innerHTML = '<p class="muted">模型正在把这句要求转换成页面与必填配置，请稍候。</p>';
+      try {
+        pendingTaskPlan = await window.TaskAssistant.propose(
+          requirement, window.Library, window.Model);
+        renderTaskPlan(pendingTaskPlan);
+      } catch (error) {
+        pendingTaskPlan = null;
+        $('#task-preview').innerHTML = '<p class="task-error">' + esc(error.message || String(error)) +
+          '</p><p class="muted">可以关闭这个窗口，用上方的页面组和勾选框手动配置。</p>';
+      } finally {
+        button.disabled = false;
+        button.textContent = '重新生成配置预览';
+      }
+    });
+
+    $('#btn-task-apply').addEventListener('click', function () {
+      if (!pendingTaskPlan) return;
+      selected = window.TaskAssistant.toSelection(pendingTaskPlan, window.Library);
+      saveSelected();
+      resetTaskDialog();
+      taskDialog.close();
+      renderAll();
+      toast('已应用质控任务：' + selected.ids.length + ' 个页面、' + selected.add.length + ' 项必填。请核对后上传报告。', 'ok');
+    });
+
+    function renderTaskPlan(plan) {
+      var pageNames = plan.pageIds.map(function (id) {
+        var page = window.Library.pageById(id);
+        return page ? page.name : id;
+      });
+      var requiredNames = plan.requiredIndicatorIds.map(function (id) {
+        var ind = window.Library.byId(id);
+        return ind ? ind.name : id;
+      });
+      var notes = plan.warnings.concat(plan.unmatched.map(function (item) {
+        return item.text + (item.reason ? '：' + item.reason : '');
+      }));
+      $('#task-preview').innerHTML = '<h3>配置预览</h3>' +
+        (plan.summary ? '<p>' + esc(plan.summary) + '</p>' : '') +
+        '<p><strong>整理页面（' + plan.pageIds.length + '）</strong></p><p>' + esc(pageNames.join('、')) + '</p>' +
+        '<p><strong>必填指标（' + plan.requiredIndicatorIds.length + '）</strong></p><p>' +
+        esc(requiredNames.length ? requiredNames.join('、') : '无；只整理，不设缺失标红') + '</p>' +
+        (notes.length ? '<div class="task-warnings"><strong>未自动落实</strong><ul>' + notes.map(function (note) {
+          return '<li>' + esc(note) + '</li>';
+        }).join('') + '</ul></div>' : '') +
+        '<p class="muted">确认后会替换当前本批规则，不会修改指标库，也不会自动开始识别。</p>';
+      $('#btn-task-apply').disabled = false;
+    }
+
+    $('#action-queue').addEventListener('click', function (e) {
+      var item = e.target.closest('[data-action-ind]');
+      if (item) openCompare(item.getAttribute('data-action-ind'));
     });
 
     $('#page-checks').addEventListener('change', function (e) {
@@ -2938,6 +3059,7 @@
   // 给自动化测试用的只读钩子：验证"新建页面+文书类型"是否真的进入了候选
   window.__docPages = docPages;
   window.__candidatesFor = candidatesFor;
+  window.__targetIds = targetIds;
     window.__parseJson = parseJson;
   }
 

@@ -93,6 +93,7 @@
           <div id="stats" class="stats" aria-label="待核对概览"></div>
         </div>
         <div id="date-bar" class="date-bar" hidden></div>
+        <div id="action-queue" class="action-queue" aria-label="需要处理的事项" hidden></div>
         <div id="results-empty" class="stage-empty" role="status" hidden></div>
         <div id="results-table" class="table-wrap">
           <table class="grid">
@@ -120,6 +121,8 @@
     <button type="button" class="btn" data-close-dialog aria-label="关闭规则">×</button>
   </div>
   <p class="muted">规则应用于本批所有患者。已识别报告可在报告详情中重新识别。</p>
+  <button id="btn-task-ai" class="btn primary wide" type="button">一句话生成质控任务</button>
+  <p class="muted">AI 只提出页面与必填配置，预览确认后才应用。</p>
   <div class="rule-picker">
     <label for="rule-preset">套用页面组</label>
     <select id="rule-preset" class="select"></select>
@@ -129,6 +132,24 @@
   <div class="dialog-actions">
     <button id="btn-library" class="link" type="button">管理指标与页面</button>
     <button type="button" class="btn primary" data-close-dialog>完成</button>
+  </div>
+</dialog>
+
+<dialog id="task-dialog" class="workbench-dialog task-dialog" aria-labelledby="task-title">
+  <div class="dialog-heading">
+    <h2 id="task-title">一句话生成质控任务</h2>
+    <button type="button" class="btn" data-close-task aria-label="关闭">×</button>
+  </div>
+  <label for="task-requirement">本次要整理什么，哪些项目必须齐全？</label>
+  <textarea id="task-requirement" rows="4" maxlength="500" placeholder="例如：本次整理病案首页、血常规和肾功能；姓名、血红蛋白、肌酐为必填，其他指标有就整理。"></textarea>
+  <p class="muted">模型只能使用现有页面和指标。无法对应的要求会单独列出，不会自动创建医学规则。</p>
+  <div class="dialog-actions">
+    <button id="btn-task-generate" class="btn primary" type="button">生成配置预览</button>
+  </div>
+  <div id="task-preview" class="task-preview" aria-live="polite"></div>
+  <div class="dialog-actions">
+    <button type="button" class="btn" data-close-task>取消</button>
+    <button id="btn-task-apply" class="btn primary" type="button" disabled>确认并替换本批规则</button>
   </div>
 </dialog>
 
@@ -154,6 +175,7 @@
 <script src="vendor/pdf-tools.js"></script>
 <script src="js/indicators.js"></script>
 <script src="js/model.js"></script>
+<script src="js/task-assistant.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
