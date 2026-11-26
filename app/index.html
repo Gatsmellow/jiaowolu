@@ -143,11 +143,21 @@
   </div>
   <label for="task-requirement">本次要整理什么，哪些项目必须齐全？</label>
   <textarea id="task-requirement" rows="4" maxlength="500" placeholder="例如：本次整理病案首页、血常规和肾功能；姓名、血红蛋白、肌酐为必填，其他指标有就整理。"></textarea>
+  <div class="task-attach-row">
+    <button id="btn-task-file" class="btn" type="button">上传单据照片或 PDF</button>
+    <input id="task-file" type="file" accept="image/*,application/pdf" hidden>
+    <span class="muted">也可以直接在这里粘贴截图（Ctrl / ⌘ + V）</span>
+  </div>
+  <div id="task-attach" class="task-attach" hidden></div>
   <p class="muted">模型只能使用现有页面和指标。无法对应的要求会单独列出，不会自动创建医学规则。</p>
   <div class="dialog-actions">
     <button id="btn-task-generate" class="btn primary" type="button">生成配置预览</button>
   </div>
   <div id="task-preview" class="task-preview" aria-live="polite"></div>
+  <div class="dialog-actions task-save-row">
+    <label class="task-save-group"><input type="checkbox" id="task-save-group"> 另存为页面组</label>
+    <input id="task-group-name" type="text" maxlength="20" placeholder="组名，例如：淋巴瘤初诊" disabled>
+  </div>
   <div class="dialog-actions">
     <button type="button" class="btn" data-close-task>取消</button>
     <button id="btn-task-apply" class="btn primary" type="button" disabled>确认并替换本批规则</button>

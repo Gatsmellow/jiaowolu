@@ -55,13 +55,18 @@
     }).join('\n');
   }
 
-  function buildPrompt(requirement, Library) {
+  function buildPrompt(requirement, Library, hasImage) {
     return [
       '你是医疗数据录入工具的“质控任务配置器”，不是医生，也不做医学判断。',
       '把用户要求转换成"这一批要看哪些页面、哪些指标必须齐全"。只能使用下面目录里已有的 ID。',
       '',
       '用户要求：' + requirement,
       '',
+      hasImage ? [
+        '随附一张单据的照片或截图。请先看它是什么单据（病案首页、血常规、生化、出凝血、病理、FISH、影像等），',
+        '再根据单据上出现的项目和用户的要求，选出页面与必填项。图片只是线索：同样只能用目录里的 ID，',
+        '看不清或判断不了的项目放进 unmatched，不要猜。'
+      ].join('') : '',
       '页面与指标目录（页面ID｜页面名｜文书类型｜该页指标）：',
       buildCatalog(Library),
       '',
@@ -154,19 +159,32 @@
     return { ids: plan.pageIds.slice(), add: required, drop: drop };
   }
 
-  async function propose(requirement, Library, Model) {
+  async function propose(requirement, Library, Model, options) {
+    var opt = options || {};
+    var image = opt.image || '';
     var text = String(requirement || '').trim();
-    if (text.length < 2 || text.length > 500) throw new Error('任务要求请填写 2～500 个字符。');
-    if (!Model || typeof Model.text !== 'function') throw new Error('当前模型客户端还不支持文本任务配置。');
-    var response = await Model.text(buildPrompt(text, Library), { maxTokens: 3000, json: true });
+    if (!image && (text.length < 2 || text.length > 500)) {
+      throw new Error('任务要求请填写 2～500 个字符，或附上一张单据照片。');
+    }
+    if (image && text.length > 500) throw new Error('任务要求请控制在 500 个字符以内。');
+    if (!image && text.length === 0) text = '';
+    if (!Model) throw new Error('当前模型客户端不可用。');
+    var prompt = buildPrompt(text || '（没有文字要求，请只根据这张单据判断）', Library, !!image);
+    var response;
+    if (image) {
+      if (typeof Model.vision !== 'function') throw new Error('当前模型客户端还不支持读图。');
+      response = await Model.vision(image, prompt, { maxTokens: 3000, json: true });
+    } else {
+      if (typeof Model.text !== 'function') throw new Error('当前模型客户端还不支持文本任务配置。');
+      response = await Model.text(prompt, { maxTokens: 3000, json: true });
+    }
     return sanitizePlan(parseJson(response.text), Library);
   }
 
   var api = {
     DOC_TYPES: docTypes,
     buildCatalog: buildCatalog,
-    buildPrompt: buildPrompt,
-    parseJson: parseJson,
+    buildPrompt: buildPrompt,    parseJson: parseJson,
     sanitizePlan: sanitizePlan,
     toSelection: toSelection,
     propose: propose

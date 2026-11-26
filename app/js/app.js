@@ -2633,12 +2633,65 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
 
     /* ---------------- 一句话质控任务：AI 提案，本地校验，人工确认 ---------------- */
     var pendingTaskPlan = null;
+    var pendingTaskImage = '';
+    var pendingTaskImageName = '';
     var taskDialog = $('#task-dialog');
 
     function resetTaskDialog() {
       pendingTaskPlan = null;
+      pendingTaskImage = '';
+      pendingTaskImageName = '';
       $('#task-preview').innerHTML = '';
       $('#btn-task-apply').disabled = true;
+      $('#task-save-group').checked = false;
+      $('#task-group-name').value = '';
+      $('#task-group-name').disabled = true;
+      clearTaskAttachment();
+    }
+
+    function clearTaskAttachment() {
+      var box = $('#task-attach');
+      box.innerHTML = '';
+      box.hidden = true;
+    }
+
+    function setTaskImage(dataUrl, name) {
+      pendingTaskImage = dataUrl;
+      pendingTaskImageName = name || '粘贴的截图';
+      var box = $('#task-attach');
+      box.innerHTML = '<img class="task-attach-thumb" alt="" src="' + dataUrl + '">' +
+        '<span class="task-attach-meta">' + esc(pendingTaskImageName) + '</span>' +
+        '<button type="button" class="link" id="btn-task-attach-clear">移除</button>';
+      box.hidden = false;
+    }
+
+    function readAsDataUrl(file) {
+      return new Promise(function (resolve, reject) {
+        var reader = new FileReader();
+        reader.onload = function () { resolve(String(reader.result || '')); };
+        reader.onerror = function () { reject(new Error('读取文件失败')); };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function attachTaskFile(file) {
+      if (!file) return;
+      try {
+        if (/^image\//.test(file.type)) {
+          setTaskImage(await readAsDataUrl(file), file.name);
+          return;
+        }
+        if (/pdf/i.test(file.type) || /\.pdf$/i.test(file.name)) {
+          if (!window.PdfTools) throw new Error('当前页面没有加载 PDF 模块');
+          var pdf = await window.PdfTools.openPdf(file);
+          var first = await window.PdfTools.renderPage(pdf, 1, { dpi: 130, maxEdge: 1400 });
+          setTaskImage(first.dataUrl, file.name + '（第 1 页）');
+          return;
+        }
+        toast('只支持图片或 PDF。', 'err');
+      } catch (error) {
+        toast('读取附件失败：' + (error.message || error), 'err');
+      }
     }
 
     $('#btn-task-ai').addEventListener('click', function () {
@@ -2659,14 +2712,20 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
     $('#btn-task-generate').addEventListener('click', async function () {
       var button = this;
       var requirement = $('#task-requirement').value.trim();
+      if (!pendingTaskImage && requirement.length < 2) {
+        $('#task-preview').innerHTML = '<p class="task-error">请先写一句要求，或者上传 / 粘贴一张单据。</p>';
+        return;
+      }
       button.disabled = true;
       button.textContent = '正在生成…';
       $('#btn-task-apply').disabled = true;
       pendingTaskPlan = null;
-      $('#task-preview').innerHTML = '<p class="muted">模型正在把这句要求转换成页面与必填配置，请稍候。</p>';
+      $('#task-preview').innerHTML = '<p class="muted">模型正在把' +
+        (pendingTaskImage ? '这张单据和你的要求' : '这句要求') +
+        '转换成页面与必填配置，请稍候。</p>';
       try {
         pendingTaskPlan = await window.TaskAssistant.propose(
-          requirement, window.Library, window.Model);
+          requirement, window.Library, window.Model, { image: pendingTaskImage });
         renderTaskPlan(pendingTaskPlan);
       } catch (error) {
         pendingTaskPlan = null;
@@ -2680,37 +2739,154 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
 
     $('#btn-task-apply').addEventListener('click', function () {
       if (!pendingTaskPlan) return;
+      if (!pendingTaskPlan.pageIds.length) {
+        toast('至少要保留一个页面。', 'err');
+        return;
+      }
+      var wantGroup = $('#task-save-group').checked;
+      var groupName = $('#task-group-name').value.trim();
+      if (wantGroup && !groupName) {
+        toast('给要保存的页面组起个名字。', 'err');
+        $('#task-group-name').focus();
+        return;
+      }
       selected = window.TaskAssistant.toSelection(pendingTaskPlan, window.Library);
       saveSelected();
+      var savedGroup = null;
+      if (wantGroup) {
+        try {
+          savedGroup = window.Library.addGroup({
+            name: groupName,
+            pageIds: pendingTaskPlan.pageIds.slice(),
+            reqIds: pendingTaskPlan.requiredIndicatorIds.slice()
+          });
+        } catch (error) {
+          toast('页面组没存上：' + (error.message || error), 'err');
+        }
+      }
       resetTaskDialog();
       taskDialog.close();
       renderAll();
-      toast('已应用质控任务：' + selected.ids.length + ' 个页面、' + selected.add.length + ' 项必填。请核对后上传报告。', 'ok');
+      toast('已应用质控任务：' + selected.ids.length + ' 个页面、' + selected.add.length + ' 项必填。' +
+        (savedGroup ? ' 另存为页面组「' + savedGroup.name + '」。' : '') +
+        '请核对后上传报告。', 'ok');
     });
 
     function renderTaskPlan(plan) {
-      var pageNames = plan.pageIds.map(function (id) {
-        var page = window.Library.pageById(id);
-        return page ? page.name : id;
-      });
-      var requiredNames = plan.requiredIndicatorIds.map(function (id) {
-        var ind = window.Library.byId(id);
-        return ind ? ind.name : id;
-      });
-      var notes = plan.warnings.concat(plan.unmatched.map(function (item) {
-        return item.text + (item.reason ? '：' + item.reason : '');
-      }));
-      $('#task-preview').innerHTML = '<h3>配置预览</h3>' +
+      var pages = window.Library.pages();
+      var required = {};
+      plan.requiredIndicatorIds.forEach(function (id) { required[id] = true; });
+      var pageIds = {};
+      plan.pageIds.forEach(function (id) { pageIds[id] = true; });
+      var notes = plan.warnings.map(function (w) { return String(w); })
+        .concat(plan.unmatched.map(function (item) {
+          return item.text + (item.reason ? '：' + item.reason : '');
+        }));
+
+      var pageHtml = pages.map(function (page) {
+        var tag = (page.docType && page.docType !== page.name) ? '<em>' + esc(page.docType) + '</em>' : '';
+        return '<label class="tp-page"><input type="checkbox" value="' + esc(page.id) + '"' +
+          (pageIds[page.id] ? ' checked' : '') + '> <span>' + esc(page.name) + '</span>' + tag + '</label>';
+      }).join('');
+
+      var reqHtml = plan.pageIds.map(function (pid) {
+        var page = window.Library.pageById(pid);
+        if (!page) return '';
+        var items = (page.ids || []).map(function (indId) {
+          var ind = window.Library.byId(indId);
+          if (!ind) return '';
+          return '<label class="tp-req"><input type="checkbox" value="' + esc(ind.id) + '"' +
+            (required[ind.id] ? ' checked' : '') + '> ' + esc(ind.name) + '</label>';
+        }).join('');
+        return '<div class="tp-req-group"><b>' + esc(page.name) + '</b><div>' + items + '</div></div>';
+      }).join('');
+
+      $('#task-preview').innerHTML = '<h3>配置预览 <span class="muted">可以直接改，改完再确认</span></h3>' +
         (plan.summary ? '<p>' + esc(plan.summary) + '</p>' : '') +
-        '<p><strong>整理页面（' + plan.pageIds.length + '）</strong></p><p>' + esc(pageNames.join('、')) + '</p>' +
-        '<p><strong>必填指标（' + plan.requiredIndicatorIds.length + '）</strong></p><p>' +
-        esc(requiredNames.length ? requiredNames.join('、') : '无；只整理，不设缺失标红') + '</p>' +
+        '<p><strong>整理页面（' + plan.pageIds.length + ' / ' + pages.length + '）</strong></p>' +
+        '<div class="tp-pages">' + pageHtml + '</div>' +
+        '<p><strong>必填指标（' + plan.requiredIndicatorIds.length + '）</strong>' +
+        '<span class="muted">只勾"缺了要打回"的；不勾表示只整理、缺失不标红</span></p>' +
+        '<div class="tp-reqs">' + (reqHtml || '<p class="muted">还没有选中任何页面。</p>') + '</div>' +
         (notes.length ? '<div class="task-warnings"><strong>未自动落实</strong><ul>' + notes.map(function (note) {
           return '<li>' + esc(note) + '</li>';
         }).join('') + '</ul></div>' : '') +
         '<p class="muted">确认后会替换当前本批规则，不会修改指标库，也不会自动开始识别。</p>';
       $('#btn-task-apply').disabled = false;
+      $('#task-group-name').disabled = !$('#task-save-group').checked;
+      if ($('#task-save-group').checked && !$('#task-group-name').value.trim()) {
+        $('#task-group-name').value = (plan.summary || '新任务').slice(0, 20);
+      }
     }
+
+    $('#task-preview').addEventListener('change', function (e) {
+      if (!pendingTaskPlan) return;
+      var input = e.target;
+      if (!input || input.tagName !== 'INPUT') return;
+      if (input.closest('.tp-page')) {
+        var pid = input.value;
+        var at = pendingTaskPlan.pageIds.indexOf(pid);
+        if (input.checked && at === -1) {
+          pendingTaskPlan.pageIds.push(pid);
+        } else if (!input.checked && at >= 0) {
+          pendingTaskPlan.pageIds.splice(at, 1);
+          var own = (window.Library.pageById(pid) || {}).ids || [];
+          pendingTaskPlan.requiredIndicatorIds = pendingTaskPlan.requiredIndicatorIds.filter(function (id) {
+            return own.indexOf(id) === -1;
+          });
+        }
+        renderTaskPlan(pendingTaskPlan);
+        return;
+      }
+      if (input.closest('.tp-req')) {
+        var rid = input.value;
+        var ri = pendingTaskPlan.requiredIndicatorIds.indexOf(rid);
+        if (input.checked && ri === -1) pendingTaskPlan.requiredIndicatorIds.push(rid);
+        if (!input.checked && ri >= 0) pendingTaskPlan.requiredIndicatorIds.splice(ri, 1);
+        renderTaskPlan(pendingTaskPlan);
+      }
+    });
+
+    $('#task-save-group').addEventListener('change', function () {
+      var on = this.checked;
+      $('#task-group-name').disabled = !on;
+      if (on && !$('#task-group-name').value.trim() && pendingTaskPlan) {
+        $('#task-group-name').value = (pendingTaskPlan.summary || '新任务').slice(0, 20);
+      }
+      if (on) $('#task-group-name').focus();
+    });
+
+    $('#btn-task-file').addEventListener('click', function () {
+      $('#task-file').click();
+    });
+
+    $('#task-file').addEventListener('change', function () {
+      var file = this.files && this.files[0];
+      attachTaskFile(file);
+      this.value = '';
+    });
+
+    $('#task-attach').addEventListener('click', function (e) {
+      if (e.target.id === 'btn-task-attach-clear') {
+        pendingTaskImage = '';
+        pendingTaskImageName = '';
+        clearTaskAttachment();
+      }
+    });
+
+    taskDialog.addEventListener('paste', function (e) {
+      var items = (e.clipboardData && e.clipboardData.items) || [];
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].type && items[i].type.indexOf('image/') === 0) {
+          var file = items[i].getAsFile();
+          if (file) {
+            e.preventDefault();
+            attachTaskFile(file);
+            return;
+          }
+        }
+      }
+    });
 
     $('#action-queue').addEventListener('click', function (e) {
       var item = e.target.closest('[data-action-ind]');

@@ -1039,3 +1039,21 @@ table.mini-grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .rerun-hint b { font-size: 15px; }
 .rerun-hint .btn { flex: 0 0 auto; }
 .rerun-hint .rerun-note { color: #9a6b3f; font-size: 12px; }
+/* 一句话任务：附件与可编辑预览 */
+.task-attach-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 2px; }
+.task-attach-row .muted { font-size: 12px; }
+.task-attach { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); margin: 4px 0 8px; }
+.task-attach[hidden] { display: none; }
+.task-attach-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+.task-attach-meta { font-size: 12px; color: var(--muted); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-save-row { justify-content: flex-start; gap: 10px; flex-wrap: wrap; }
+.task-save-group { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+#task-group-name { max-width: 220px; }
+.tp-pages { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 4px 0 10px; }
+.tp-page { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; background: #fff; }
+.tp-page em { font-style: normal; font-size: 11px; color: var(--muted); }
+.tp-reqs { max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #fbfcfe; }
+.tp-req-group { margin-bottom: 8px; }
+.tp-req-group b { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.tp-req-group > div { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.tp-req { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
