@@ -14,7 +14,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = process.env.JW_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const PORT = 9347;
 const APP = process.env.JW_APP || 'http://127.0.0.1:8765/';
 
@@ -26,7 +26,7 @@ const key = (() => {
   }
 })();
 if (!key) {
-  console.error('[x] secrets/ark_api.txt 里没有 Key');
+  console.error('[skip] 缺少 secrets/ark_api.txt，本次未重新实测模型准确率（退出码 2 表示跳过，不是通过）');
   process.exit(2);
 }
 

@@ -254,6 +254,23 @@
     { id: 'ct',     kind: 'special', on: false, name: '增强CT报告',   ids: ['CT_RPT', 'CT_TYPE'] }
   ];
 
+  /* 默认页面归属哪种文书。老存档里的页面没有 docType，按这张表补上；
+   * 用户新建的页面自己选，选"其他"或不选就不参与定向抽取。 */
+  var DEFAULT_DOC_TYPE = {
+    course: '病案首页', cbc: '血常规',
+    liver: '生化', renal: '生化', elec: '生化', bio: '生化',
+    discharge: '出院小结', coag: '出凝血', immu: '免疫', infect: '病毒学',
+    fish: 'FISH', patho: '病理', flow: '骨髓流式', ct: '影像'
+  };
+  DEFAULT_PAGES.forEach(function (p) { if (!p.docType) p.docType = DEFAULT_DOC_TYPE[p.id] || ''; });
+  function backfillDocType(p) {
+    if (!p || typeof p !== 'object') return p;
+    if (p.docType === undefined || p.docType === null || p.docType === '') {
+      p.docType = DEFAULT_DOC_TYPE[p.id] || '';
+    }
+    return p;
+  }
+
   /* 页面组：把一批页面打成一包，勾组等于"把组里这些页面一起勾上"。
      组里还可以预设"这一组里哪些指标算必填"——淋巴瘤质控和常规随访要盯的项不一样，
      但不必每次重建一遍页面。页面可以同时属于多个组。 */
@@ -324,7 +341,9 @@
               if (!same) p.ids = def.ids.slice();
               p.name = def.name;
               p.kind = def.kind;
+              p.docType = def.docType;
             });
+            old.pages.forEach(backfillDocType);
             state = { indicators: old.indicators, pages: old.pages, groups: clone(DEFAULT_GROUPS) };
             rebuild(); save();
             try { global.localStorage.removeItem(PREV_KEY); } catch (e2) { /* ignore */ }
@@ -343,6 +362,8 @@
       got.indicators.forEach(function (i) { if (!i.type) i.type = 'num'; });
       // 上一版没有页面组，补一份默认的；已有的组原样保留
       var gs = Array.isArray(got.groups) && got.groups.length ? got.groups : clone(DEFAULT_GROUPS);
+      // 上一版页面没有 docType：按默认归属补齐，老配置照常能用
+      got.pages.forEach(backfillDocType);
       state = { indicators: got.indicators, pages: got.pages, groups: gs };
     } catch (e) {
       // 存档坏了就退回种子，不要让一份坏数据把整个工作台打死
@@ -578,6 +599,11 @@
 
   /* ---------------- 页面增删改 ---------------- */
 
+  /* 文书类型：模型第一批只需判断"这一页是哪一种"，判完才知道该问它要哪些指标。
+   * 这个列表是固定的分类（判断结果只有这几种），但"哪种类型对应哪些页面"是可配置的：
+   * 每个页面记着自己的 docType，新建页面时选一个类型，它就参与那一类的抽取。 */
+  var DOC_TYPES = ['血常规', '生化', '出凝血', '免疫', '病毒学', 'FISH', '病理', '骨髓流式', '影像', '病案首页', '出院小结', '其他'];
+
   function cleanPage(raw) {
     var name = String(raw.name || '').trim();
     if (!name) throw new Error('页面名称不能为空');
@@ -586,6 +612,8 @@
     var id = String(raw.id || '').trim() || 'p' + Date.now().toString(36);
     var page = { id: id, name: name, ids: ids };
     page.kind = raw.kind === 'special' ? 'special' : 'common';
+    var docType = String(raw.docType || '').trim();
+    page.docType = DOC_TYPES.indexOf(docType) >= 0 ? docType : '';
     if (raw.on === false) page.on = false;   // 默认不勾选的页（库大、默认表要小）
     return page;
   }
@@ -601,7 +629,7 @@
   function updatePage(id, raw) {
     var i = state.pages.map(function (x) { return x.id; }).indexOf(id);
     if (i === -1) throw new Error('这个页面已经不在了');
-    var p = cleanPage({ id: id, name: raw.name, ids: raw.ids, on: raw.on });
+    var p = cleanPage({ id: id, name: raw.name, ids: raw.ids, on: raw.on, docType: raw.docType, kind: raw.kind });
     state.pages[i] = p;
     save();
     return p;
@@ -628,6 +656,7 @@
   global.Library = {
     indicators: indicators,
     pages: pages,
+    DOC_TYPES: DOC_TYPES,
     byId: byId,
     pageById: pageById,
     match: match,

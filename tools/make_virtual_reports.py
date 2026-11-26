@@ -64,24 +64,25 @@ def canvas(h: int):
     return img, d, t, line, rect
 
 
-def head(t, line, title: str, date: str, instrument: str = "", extra: str = ""):
+def head(t, line, title: str, date: str, instrument: str = "", extra: str = "", pat=None):
     """页眉：医院 + 报告名 + 病人信息三行 + 分隔线"""
     t(80, 44, HOSP, 34)
     t(W - 80, 52, "医学检验科", 22, GREY, anchor="ra")
     t(W // 2, 96, title, 30, RED, anchor="ma")
     line(70, 150, W - 70, 150, INK, 2)
 
-    t(80, 172, "姓　　名：" + PAT["name"], 22)
+    pat = pat or PAT
+    t(80, 172, "姓　　名：" + pat["name"], 22)
     t(560, 172, "科　　室：" + DEPT, 22)
-    t(1120, 172, "病 人 号：" + PAT["mrn"], 22)
-    t(80, 210, "性　　别：" + PAT["sex"], 22)
+    t(1120, 172, "病 人 号：" + pat["mrn"], 22)
+    t(80, 210, "性　　别：" + pat["sex"], 22)
     t(560, 210, "病　　区：" + DEPT, 22)
-    t(1120, 210, "标 本 号：" + PAT["sample_no"], 22)
-    t(80, 248, "年　　龄：" + PAT["age"] + "岁", 22)
-    t(560, 248, "床　　号：" + PAT["bed"], 22)
+    t(1120, 210, "标 本 号：" + pat["sample_no"], 22)
+    t(80, 248, "年　　龄：" + pat["age"] + "岁", 22)
+    t(560, 248, "床　　号：" + pat["bed"], 22)
     t(1120, 248, "检测仪器：" + (instrument or "—"), 22)
     t(80, 286, "申请项目：" + extra, 22)
-    t(760, 286, "临床诊断：" + PAT["diag"], 22)
+    t(760, 286, "临床诊断：" + pat["diag"], 22)
     t(80, 322, "采样时间：" + date, 22)
     line(70, 358, W - 70, 358)
 
@@ -235,11 +236,11 @@ def wrap_lines(text: str, width: int) -> list[str]:
 
 
 def lab_report(filename: str, title: str, data, date: str,
-               instrument: str = "", extra: str = "", note: str = "带＊项目为检验结果互认项目。"):
+               instrument: str = "", extra: str = "", note: str = "带＊项目为检验结果互认项目。", pat=None, outdir=None):
     rows = data
     H = 470 + len(rows) * 40 + 230
     img, d, t, line, rect = canvas(H)
-    head(t, line, title, date, instrument, extra)
+    head(t, line, title, date, instrument, extra, pat)
     y0 = 380
     if note:
         t(80, y0 - 34, note, 20, GREY)
@@ -248,11 +249,11 @@ def lab_report(filename: str, title: str, data, date: str,
     t(80, y + 60, "检验者：周晓岚　　　　审核者：陈立群", 21, GREY)
     t(80, y + 96, "注：此结果仅对本次标本负责；如有疑问，请在报告发布一周内提出。", 19, GREY)
     img = img.resize((W, H), Image.LANCZOS)
-    img.save(os.path.join(OUT, filename), quality=90)
+    img.save(os.path.join(outdir or OUT, filename), quality=90)
     print("  " + filename, img.size)
 
 
-def text_report(filename: str, title: str, blocks, date: str, instrument: str = "—", extra: str = ""):
+def text_report(filename: str, title: str, blocks, date: str, instrument: str = "—", extra: str = "", pat=None, outdir=None):
     """段落型文书：出院记录、病理报告、影像报告"""
     lines_all = []
     for kind, body in blocks:
@@ -263,7 +264,7 @@ def text_report(filename: str, title: str, blocks, date: str, instrument: str = 
                 lines_all.append(("p", ln))
     H = 470 + len(lines_all) * 40 + 200
     img, d, t, line, rect = canvas(H)
-    head(t, line, title, date, instrument, extra)
+    head(t, line, title, date, instrument, extra, pat)
     y = 388
     for kind, body in lines_all:
         if kind == "h":
@@ -276,15 +277,15 @@ def text_report(filename: str, title: str, blocks, date: str, instrument: str = 
     t(80, y + 50, "记录医师：尹桂香　　　　审核医师：何雪梅", 21, GREY)
     t(80, y + 86, "本文件为演示用虚构资料，不含任何真实患者信息。", 19, GREY)
     img = img.resize((W, H), Image.LANCZOS)
-    img.save(os.path.join(OUT, filename), quality=90)
+    img.save(os.path.join(outdir or OUT, filename), quality=90)
     print("  " + filename, img.size)
 
 
-def form_report(filename: str, title: str, fields, date: str, extra: str = ""):
+def form_report(filename: str, title: str, fields, date: str, extra: str = "", pat=None, outdir=None):
     """表格型文书：病案首页"""
     H = 470 + max(1, (len(fields) + 1) // 2) * 52 + 220
     img, d, t, line, rect = canvas(H)
-    head(t, line, title, date, "—", extra)
+    head(t, line, title, date, "—", extra, pat)
     y = 384
     colw = (W - 140) // 2
     for i, (label, value) in enumerate(fields):
@@ -299,7 +300,7 @@ def form_report(filename: str, title: str, fields, date: str, extra: str = ""):
     t(80, y + rows * 52 + 28, "科主任：陈祖聪　　质控医师：赵维成　　质控护士：董露露", 21, GREY)
     t(80, y + rows * 52 + 64, "本文件为演示用虚构资料，不含任何真实患者信息。", 19, GREY)
     img = img.resize((W, H), Image.LANCZOS)
-    img.save(os.path.join(OUT, filename), quality=90)
+    img.save(os.path.join(outdir or OUT, filename), quality=90)
     print("  " + filename, img.size)
 
 
@@ -335,9 +336,9 @@ def main() -> None:
     ], "2026-11-20 15:08", "荧光显微镜", "右颈部淋巴结切除标本")
 
     form_report("vr-course-20261120.jpg", "住院病案首页", [
-        ("姓名：", PAT["name"]), ("性别：", PAT["sex"]),
-        ("住院号：", PAT["mrn"]), ("就诊年龄：", PAT["age"] + " 岁"),
-        ("年龄：", PAT["age"]), ("就诊日期：", "2026-11-18"),
+        ("姓名：", PAT["name"]), ("性别：", pat["sex"]),
+        ("住院号：", pat["mrn"]), ("就诊年龄：", pat["age"] + " 岁"),
+        ("年龄：", pat["age"]), ("就诊日期：", "2026-11-18"),
         ("诊断分型：", "弥漫大B细胞淋巴瘤（非特殊型，Ⅳ期）"), ("民族：", "汉族"),
         ("户籍：", "上海市浦东新区"), ("身份证号：", "310115196801011234"),
         ("联系电话：", "13800138000"), ("其他联系方式：", "李伟；13900139000"),

@@ -19,7 +19,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = process.env.JW_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const PORT = 9349;
 const APP = process.env.JW_APP || 'http://127.0.0.1:8765/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -29,7 +29,7 @@ const key = (() => {
     return readFileSync(join(ROOT, 'secrets', 'ark_api.txt'), 'utf8').trim().split(/\r?\n/)[0].trim();
   } catch { return ''; }
 })();
-if (!key) { console.error('[x] 没有 Key'); process.exit(2); }
+if (!key) { console.error('[skip] 缺少 secrets/ark_api.txt，本次未重新实测模型准确率（退出码 2 表示跳过，不是通过）'); process.exit(2); }
 
 class CDP {
   constructor(ws) {

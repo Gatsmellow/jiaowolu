@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = process.env.JW_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const PORT = 9338;
 const APP = process.env.JW_APP || 'http://127.0.0.1:8765/';
 const HOST_RULES = process.env.JW_HOST_RULES || '';

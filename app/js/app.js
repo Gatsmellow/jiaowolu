@@ -22,20 +22,22 @@
      先判类型再抽取，是为了不让模型到出院记录的正文里去"捞"血常规——
      那里面确实写着"白细胞计数:5.54*10^9/L"，照抄下来就成了另一份来源，
      跟真正的化验单对不上，白白制造一堆"两处不一致"。 */
-  var DOC_PAGES = {
-    '血常规': ['cbc'],
-    '生化': ['bio', 'liver', 'renal', 'elec'],
-    '出凝血': ['coag'],
-    '免疫': ['immu'],
-    '病毒学': ['infect'],
-    'FISH': ['fish'],
-    '病理': ['patho'],
-    '骨髓流式': ['flow'],
-    '影像': ['ct'],
-    '病案首页': ['course'],
-    '出院小结': ['discharge'],
-    '其他': []
-  };
+  /* 文书类型 → 页面。这张映射不再写死：每个页面自己记着 docType
+   * （在「指标与页面」里选，可随配置导出导入），所以新建页面只要选对类型，
+   * 就自动参与那一类文书的定向抽取。
+   * 分类本身是固定枚举（模型只需要答出属于哪一种），见 Library.DOC_TYPES。 */
+  function docTypeList() {
+    return (window.Library && window.Library.DOC_TYPES) || ['其他'];
+  }
+  function docPages() {
+    var map = {};
+    docTypeList().forEach(function (t) { map[t] = []; });
+    window.Library.pages().forEach(function (p) {
+      var t = p.docType;
+      if (t && map[t]) map[t].push(p.id);
+    });
+    return map;
+  }
   /* 页眉字段：每一份单据的抬头都可能印着，跟文书类型无关 */
   // 页眉/身份类字段：只从"病案首页"取，别的文书一律不抄（省 token，也免掉"男/男性"这种噪音）
   var HEADER_IDS = ['NAME', 'SEX', 'AGE', 'VISITAGE', 'ADMNO', 'VISITDATE', 'HOSP'];
@@ -50,7 +52,8 @@
     progress: null,
     dateFilter: '',            // 时间轴：只看某一次就诊（'' = 全部，取最近一次的值）
     collapse: {},              // 页面分组是展开还是收起，用户点过就记住
-    seq: { patient: 0, asset: 0, obs: 0 }
+    reviews: [],               // 人工复核/裁决的历史（只在本地，可随导出带出）
+    seq: { patient: 0, asset: 0, obs: 0, review: 0 }
   };
   var patientViews = new Map();
   var importing = new Set();
@@ -116,6 +119,7 @@
             currentId: S.currentId,
             assets: S.assets,
             observations: S.observations,
+            reviews: S.reviews,
             seq: S.seq
           }, 'session');
           tx.oncomplete = function () { resolve(); };
@@ -164,6 +168,7 @@
       return a;
     });
     S.observations = saved.observations || [];
+    S.reviews = Array.isArray(saved.reviews) ? saved.reviews : [];
     S.seq = saved.seq || S.seq;
     S.currentId = saved.currentId === null || S.patients.some(function (p) { return p.id === saved.currentId; })
       ? saved.currentId
@@ -739,8 +744,9 @@
   function resultRow(id, c, review) {
     var ind = window.Library.byId(id);
     var value = c.obs && c.obs.value != null ? String(c.obs.value) : '';
-    var unit = (c.obs && c.obs.unit) || ind.unit || (ind.type === 'date' ? '日期' : '');
-    var ref = (c.obs && c.obs.ref) || ind.ref;
+    // 单位/参考范围统一走 effectiveUnit/effectiveRef：报告上印的优先，缺省回退指标库默认值
+    var unit = effectiveUnit(c, ind) || (ind.type === 'date' ? '日期' : '');
+    var ref = effectiveRef(c, ind);
     var detail = viewOf(S.currentId).detail;
     var focused = detail && detail.indId === id;
     var source = c.obs && c.obs.assetId;
@@ -766,7 +772,7 @@
       '<div><button type="button" class="indicator-link" data-cmp="' + esc(id) + '"' +
       ' aria-pressed="' + Boolean(focused) + '">' + esc(ind.name) + '</button>' +
       '<div class="ind-code">' + esc(id) + '</div></div></div></td>' +
-      '<td class="col-value">' + valueCell + '<span class="unit-inline">' + esc(unit) + '</span></td>' +
+      '<td class="col-value">' + valueCell + '</td>' +
       '<td class="col-unit">' + esc(unit) + '</td><td class="col-ref">' + esc(ref) + '</td>' +
       '<td class="col-src"><span class="cell-state">' + badgeOf(c) + '</span>' + sourceButton +
       (source && c.obs.src === 'narrative' ? '<span class="src-tag">文中</span>' : '') + '</td></tr>';
@@ -1194,7 +1200,7 @@
     var d = {};
     try { d = parseJson(res.text); } catch (e) { d = {}; }
     var t = String(d.doc_type || '').trim();
-    if (!Object.prototype.hasOwnProperty.call(DOC_PAGES, t)) t = '其他';
+    if (docTypeList().indexOf(t) === -1) t = '其他';
     return { type: t, title: String(d.title || ''), confidence: d.confidence };
   }
 
@@ -1214,7 +1220,7 @@
         if (HEADER_IDS.indexOf(id) === -1 && want.indexOf(id) === -1) want.push(id);
       });
     } else {
-      (DOC_PAGES[type] || []).forEach(function (pid) {
+      (docPages()[type] || []).forEach(function (pid) {
         var pg = window.Library.pageById(pid);
         if (!pg) return;
         pg.ids.forEach(function (id) { if (want.indexOf(id) === -1) want.push(id); });
@@ -1276,7 +1282,7 @@
       '    一个括号就是一个项目。请逐个拆成独立的 items，不要只报其中一两个，也不要漏掉写在行尾的。',
       ''
     ];
-    if (docType && DOC_PAGES[docType]) {
+    if (docType && docType !== '其他') {
       body.push('这一页的文书类型是【' + docType + '】。候选指标只列了这类文书上会出现的项目，' +
         '别的文书的项目不要抽。', '');
       if (docType === '出院小结' || docType === '影像' || docType === '病理') {
@@ -1622,7 +1628,7 @@
   }
 
   function reportDetail(a) {
-    var opts = Object.keys(DOC_PAGES).map(function (type) {
+    var opts = docTypeList().map(function (type) {
       return '<option value="' + esc(type) + '"' + (a.docType === type ? ' selected' : '') + '>' + esc(type) + '</option>';
     }).join('');
     return inspectorHeading(assetLabel(a, a.reportDate), a.name) +
@@ -1701,8 +1707,53 @@
     return o && (!S.dateFilter || obsDate(o) === S.dateFilter) ? o : null;
   }
 
-  function writeManual(indId, value, observation) {
+  /* ---------------- 复核历史 ----------------
+   * 没有账号体系，所以不记"谁"，只记"什么时候、对哪一项、从什么改成什么、依据哪一份"。
+   * 记录只存在本机（跟着任务缓存一起存），导出 JSON 时一起带出，同样受脱敏开关控制。
+   * 冲突裁决会从 observations 里移除被否决的来源（否则它还会参与冲突计算），
+   * 但它的值会写进 dropped，历史里不会凭空消失。 */
+  var ACTION_NAME = {
+    'manual-edit': '人工改值',
+    'manual-add': '人工补录',
+    'low-confirm': '低置信确认',
+    'conflict-pick': '冲突裁决',
+    'confirm': '人工确认'
+  };
+  function obsSourceText(o) {
+    if (!o) return '';
+    if (!o.assetId) return '人工录入';
+    var a = S.assets.filter(function (x) { return x.id === o.assetId; })[0];
+    if (!a) return '未知来源';
+    var base = a.kind === 'pdf' ? '报告' + a.fileIndex + '-第' + a.pageNo + '页' : '报告' + a.fileIndex;
+    return base + (o.date ? ' · ' + String(o.date).slice(5, 10) : '');
+  }
+  function logReview(action, indId, before, after, extra) {
+    var ind = window.Library.byId(indId);
+    var p = current();
+    var e = {
+      id: uid('review'),
+      at: new Date().toISOString(),
+      operator: '本机操作',
+      patientId: S.currentId,
+      patientCode: p ? p.code : '',
+      code: indId,
+      name: ind ? ind.name : indId,
+      action: action,
+      before: before == null ? '' : String(before),
+      after: after == null ? '' : String(after),
+      source: (extra && extra.source) || '',
+      picked: (extra && extra.picked) || '',
+      dropped: (extra && extra.dropped) || []
+    };
+    S.reviews.push(e);
+    return e;
+  }
+
+  function writeManual(indId, value, observation, silent) {
     var o = observation;
+    var beforeValue = o ? String(o.value == null ? '' : o.value) : '';
+    var beforeSource = obsSourceText(o);
+    var created = false;
     if (!o) {
       var ind = window.Library.byId(indId);
       o = {
@@ -1711,9 +1762,14 @@
         date: S.dateFilter, confidence: 1
       };
       S.observations.push(o);
+      created = true;
     }
     o.value = value;
     o.method = 'manual';
+    // silent：输入过程中的逐字写入不记历史，等 change 时统一记一条
+    if (!silent && String(beforeValue) !== String(value == null ? '' : value)) {
+      logReview(created ? 'manual-add' : 'manual-edit', indId, beforeValue, value, { source: beforeSource });
+    }
     return o;
   }
 
@@ -1733,19 +1789,31 @@
     else if (view.mode === 'review') $('#btn-review').focus({ preventScroll: true });
   }
 
-  /* 冲突裁决只替换同一天的来源，保留其他就诊时间的结果。 */
+  /* 冲突裁决只替换同一天的来源，保留其他就诊时间的结果；
+   * 顺带把"这次确认/裁决"写进复核历史（含被否决的来源，便于事后追溯）。 */
   function pickObservation(obsId) {
     var keep = S.observations.find(function (o) { return o.id === obsId && o.patientId === S.currentId; });
     if (!keep) return;
     var c = cellState(S.currentId, keep.indicatorId);
     var before = reviewRows(S.currentId);
+    var beforeValue = c.obs ? String(c.obs.value == null ? '' : c.obs.value) : '';
+    var action = c.state === 'conflict' ? 'conflict-pick' : (c.state === 'low' ? 'low-confirm' : 'confirm');
+    var dropped = [];
     if (c.state === 'conflict') {
       var keepDate = obsDate(keep);
+      dropped = S.observations.filter(function (o) {
+        return o !== keep && o.patientId === keep.patientId && o.indicatorId === keep.indicatorId && obsDate(o) === keepDate;
+      }).map(function (o) {
+        return String(o.value) + '（' + obsSourceText(o) + '）';
+      });
       S.observations = S.observations.filter(function (o) {
         return o === keep || o.patientId !== keep.patientId || o.indicatorId !== keep.indicatorId || obsDate(o) !== keepDate;
       });
     }
     keep.method = 'manual';
+    logReview(action, keep.indicatorId, beforeValue, String(keep.value == null ? '' : keep.value), {
+      source: obsSourceText(keep), picked: obsSourceText(keep), dropped: dropped
+    });
     finishReview(keep.indicatorId, before);
     toast('已核对' + window.Library.byId(keep.indicatorId).name, 'ok');
   }
@@ -1883,8 +1951,13 @@
 
   function pageRows() {
     return window.Library.pages().map(function (p) {
+      var t = p.docType || '';
+      var tag = t
+        ? '<span class="doc-tag">' + esc(t) + '</span>'
+        : '<span class="doc-tag none" title="没选文书类型，模型不会定向抽取这一页的指标">未分类</span>';
       return '<tr>' +
         '<td>' + esc(p.name) + '</td>' +
+        '<td>' + tag + '</td>' +
         '<td class="mono">' + p.ids.length + '</td>' +
         '<td class="tiny muted">' + esc(p.ids.slice(0, 6).map(function (id) {
           var i = window.Library.byId(id); return i ? i.id : id;
@@ -1901,6 +1974,12 @@
     var page = isEdit ? window.Library.pageById(libForm.id) : null;
     if (isEdit && !page) { libForm = null; return ''; }
     var picked = page ? page.ids : [];
+    var curType = page ? (page.docType || '') : '';
+
+    var typeOpts = '<option value="">（未选，暂不参与定向抽取）</option>' +
+      docTypeList().map(function (t) {
+        return '<option value="' + esc(t) + '"' + (curType === t ? ' selected' : '') + '>' + esc(t) + '</option>';
+      }).join('');
 
     var list = window.Library.indicators().map(function (i) {
       var on = picked.indexOf(i.id) !== -1;
@@ -1915,7 +1994,10 @@
     return '<div class="lib-form">' +
       '<div class="form-grid">' +
         '<label class="span2">页面名称<input id="p-name" value="' + esc(page ? page.name : '') + '" placeholder="肝功能"></label>' +
+        '<label class="span2">文书类型<select id="p-doctype">' + typeOpts + '</select></label>' +
       '</div>' +
+      '<p class="note">"文书类型"决定模型在哪一类报告里找这些指标。比如新建一页"心肌酶"并选"生化"，' +
+      '模型读到生化单时就会连带抽这几个项目；不选类型的话，这一页只能手工填。</p>' +
       '<p class="note">勾选这一页要录的指标。一位患者的报告可能对应好几页，比如血常规 + 生化。</p>' +
       '<input id="p-search" class="pick-search" placeholder="筛选指标…">' +
       '<div id="p-picks" class="pick-list">' + list + '</div>' +
@@ -1962,7 +2044,7 @@
       html += (libForm && libForm.kind === 'page' ? pageForm() : '') +
         '<div class="pane-scroll">' +
           '<table class="mini-grid"><thead><tr>' +
-            '<th>页面</th><th>指标数</th><th>包含</th><th></th>' +
+            '<th>页面</th><th>文书类型</th><th>指标数</th><th>包含</th><th></th>' +
           '</tr></thead><tbody>' + pageRows() + '</tbody></table>' +
         '</div>';
     }
@@ -2078,15 +2160,22 @@
       else if (act === 'page-cancel') { libForm = null; renderLibrary(); }
       else if (act === 'page-save') {
         var ids = $$('#p-picks input:checked').map(function (cb) { return cb.value; });
-        var payload = { name: $('#p-name').value, ids: ids };
-        if (libForm.mode === 'edit') window.Library.updatePage(libForm.id, payload);
+        var dtSel = $('#p-doctype');
+        var payload = { name: $('#p-name').value, ids: ids, docType: dtSel ? dtSel.value : '' };
+        var saved;
+        if (libForm.mode === 'edit') saved = window.Library.updatePage(libForm.id, payload);
         else {
-          var np = window.Library.addPage(payload);
+          saved = window.Library.addPage(payload);
           var sel0 = loadSelected();
-          if (sel0.ids.indexOf(np.id) === -1) sel0.ids.push(np.id);
+          if (sel0.ids.indexOf(saved.id) === -1) sel0.ids.push(saved.id);
           saveSelected();
         }
-        libChangeDone('页面已保存');
+        // 没选文书类型：这一页不会参与定向抽取，必须说清楚，不能让人以为保存就等于能识别
+        if (!payload.docType) {
+          libChangeDone('页面已保存，但还没选"文书类型"，模型不会自动抽取这一页的指标', 'err');
+        } else {
+          libChangeDone('页面已保存');
+        }
         libForm = null;
         renderLibrary();
       }
@@ -2159,15 +2248,50 @@
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   }
 
-  /* 身份证、电话、地址这些直接标识符：录进来是为了"照着报告录"，
-   * 导出时按设置隐藏。 */
-  var IDENT_IDS = { IDNO: 1, PHONE: 1, PHONE2: 1, ADDR: 1 };
+  /* 直接标识符：导出时按开关统一处理。
+   * 姓名、身份证、电话、其他联系方式、地址，都是"看见就知道是谁"的字段；
+   * 住院号也纳入——它在医院范围内能直接对应到个人，而导出表里已经有
+   * "患者 01"这样的批次内编号，不影响核对。 */
+  var IDENT_IDS = { NAME: 1, IDNO: 1, PHONE: 1, PHONE2: 1, ADDR: 1, ADMNO: 1 };
+  var MASK_TEXT = '（已隐藏）';
   var HIDE_KEY = 'jiaowolu.hideIdent';
   function hideIdent() {
     try { return localStorage.getItem(HIDE_KEY) !== '0'; } catch (e) { return true; }
   }
 
+  /* 报告文件名里常常带着患者姓名，导出时按同一套规则替换掉 */
+  function identSecrets(pid) {
+    return S.observations.filter(function (o) {
+      return o.patientId === pid && IDENT_IDS[o.indicatorId] && o.value;
+    }).map(function (o) {
+      return String(o.value).trim();
+    }).filter(function (v) {
+      return v.length >= 2;
+    });
+  }
+  function maskText(text, secrets) {
+    var s = String(text == null ? '' : text);
+    if (!hideIdent()) return s;
+    (secrets || []).forEach(function (v) {
+      if (!v) return;
+      s = s.split(v).join(MASK_TEXT);
+    });
+    return s;
+  }
+
+  /* 单位与参考范围：报告上印的为准，报告没写才回退到指标库默认值。
+   * 界面、CSV、JSON 都走这两个函数，避免三处口径不一致。 */
+  function effectiveUnit(c, ind) {
+    var u = c && c.obs && c.obs.unit ? String(c.obs.unit).trim() : '';
+    return u || (ind && ind.unit) || '';
+  }
+  function effectiveRef(c, ind) {
+    var r = c && c.obs && c.obs.ref ? String(c.obs.ref).trim() : '';
+    return r || (ind && ind.ref) || '';
+  }
+
   function collectRows(pid, date) {
+    var secrets = identSecrets(pid);
     return targetIds().map(function (id) {
       var ind = window.IndicatorLib.byId(id);
       if (!ind) return null;
@@ -2177,19 +2301,46 @@
         : null;
       var val = c.obs ? c.obs.value : '';
       var masked = false;
-      if (val && IDENT_IDS[ind.id] && hideIdent()) { val = '（已隐藏）'; masked = true; }
+      if (val && IDENT_IDS[ind.id] && hideIdent()) { val = MASK_TEXT; masked = true; }
+      else if (val && hideIdent()) { val = maskText(val, secrets); }
       return {
         code: ind.id, name: ind.name, type: ind.type || 'num',
-        value: val, unit: ind.unit || '', ref: ind.ref || '',
+        value: val,
+        // 报告原单位/原参考范围优先，缺省才用指标库默认值
+        unit: effectiveUnit(c, ind),
+        ref: effectiveRef(c, ind),
         state: c.state, stateName: stateLabel(c),
         masked: masked,
         source: a ? (a.kind === 'pdf' ? '报告' + a.fileIndex + '-第' + a.pageNo + '页' : '报告' + a.fileIndex) : '',
         sourceType: a && a.reportType ? a.reportType : '',
-        docType: a && a.docType ? a.docType : '',
+        docType: a && (a.docType || a.reportType) ? (a.docType || a.reportType) : '',
         fromNarrative: !!(c.obs && c.obs.src === 'narrative'),
         confidence: c.obs && c.obs.confidence != null ? c.obs.confidence : null
       };
     }).filter(Boolean);
+  }
+
+  /* 复核历史按"本次导出的患者"筛出来；里面的值同样走脱敏开关 */
+  function collectReviews(patients) {
+    var byCode = {};
+    S.patients.forEach(function (p) { byCode[p.code] = p; });
+    var out = [];
+    patients.forEach(function (pt) {
+      var sp = byCode[pt.code];
+      if (!sp) return;
+      var secrets = identSecrets(sp.id);
+      S.reviews.filter(function (r) { return r.patientId === sp.id; }).forEach(function (r) {
+        out.push({
+          at: r.at, patient: r.patientCode, indicator: r.code, name: r.name,
+          action: r.action, actionName: ACTION_NAME[r.action] || r.action,
+          before: maskText(r.before, secrets), after: maskText(r.after, secrets),
+          source: maskText(r.source, secrets), picked: maskText(r.picked, secrets),
+          dropped: (r.dropped || []).map(function (d) { return maskText(d, secrets); }),
+          operator: r.operator
+        });
+      });
+    });
+    return out;
   }
 
   function exportJson(patients, filename) {
@@ -2210,6 +2361,8 @@
         var ind = window.Library.byId(id);
         return { code: id, name: ind ? ind.name : id };
       }),
+      // 人工复核与冲突裁决的历史：谁改了什么、依据哪一份、否决了哪些来源
+      reviewHistory: collectReviews(patients),
       patients: patients
     };
     saveText(filename + '.json', JSON.stringify(out, null, 2));
@@ -2245,7 +2398,7 @@
     // 页面导入时 id 会重新生成，组的页面引用要跟着换算，否则组会指向不存在的页面
     var idMap = {};
     (cfg.pages || []).forEach(function (p) {
-      var np = L.addPage({ name: p.name, ids: p.ids || [] });
+      var np = L.addPage({ name: p.name, ids: p.ids || [], docType: p.docType || '', kind: p.kind });
       idMap[p.id] = np.id;
     });
     (cfg.groups || []).forEach(function (g) {
@@ -2318,10 +2471,18 @@
     if (!scope.length) return;
     var date = patient ? S.dateFilter : '';
     var patients = scope.map(function (p) {
+      var secrets = identSecrets(p.id);
       return {
         code: p.code,
         reports: assetsOf(p.id).map(function (a) {
-          return { file: a.sourceName || '', page: a.pageNo || null, type: a.reportType || '', date: a.reportDate || '' };
+          return {
+            file: maskText(a.name || '', secrets),
+            page: a.pageNo || null,
+            // docType 是本地判型结果，reportType 是模型在抽取时回报的类型，
+            // 两个都有时以本地判型为准（用户可以在设置里手动改 docType）
+            type: a.docType || a.reportType || '',
+            date: a.reportDate || ''
+          };
         }),
         rows: collectRows(p.id, date)
       };
@@ -2498,11 +2659,20 @@
     });
 
     // 表格：改值 / 看来源
+    // 输入过程中只写值、不记历史，否则每敲一个字符就多一条记录；
+    // 光标进入时把"改之前的值和来源"记在 dataset 上，change 时才落一条。
+    $('#grid-body').addEventListener('focusin', function (e) {
+      var inp = e.target.closest('.val-input');
+      if (!inp || inp.dataset.before !== undefined) return;
+      var o = activeObservation(inp.getAttribute('data-ind'));
+      inp.dataset.before = o ? String(o.value == null ? '' : o.value) : '';
+      inp.dataset.beforeSrc = obsSourceText(o);
+    });
     $('#grid-body').addEventListener('input', function (e) {
       var inp = e.target.closest('.val-input');
       if (!inp) return;
       var id = inp.getAttribute('data-ind');
-      writeManual(id, inp.value, activeObservation(id));
+      writeManual(id, inp.value, activeObservation(id), true);
       var row = inp.closest('tr');
       var c = cellState(S.currentId, id);
       row.className = c.state + (row.classList.contains('selected-result') ? ' selected-result' : '');
@@ -2513,7 +2683,17 @@
       cacheSchedule();
     });
     $('#grid-body').addEventListener('change', function (e) {
-      if (e.target.matches('.val-input')) renderInspector();
+      var inp = e.target.closest('.val-input');
+      if (!inp) return;
+      var before = inp.dataset.before === undefined ? '' : inp.dataset.before;
+      if (String(before) !== String(inp.value)) {
+        logReview(inp.dataset.beforeSrc ? 'manual-edit' : 'manual-add', inp.getAttribute('data-ind'),
+          before, inp.value, { source: inp.dataset.beforeSrc || '' });
+        cacheSchedule();
+      }
+      delete inp.dataset.before;
+      delete inp.dataset.beforeSrc;
+      renderInspector();
     });
 
     $('#grid-body').addEventListener('click', function (e) {
@@ -2755,6 +2935,9 @@
 
     // 暴露给控制台，方便调试
     window.__S = S;
+  // 给自动化测试用的只读钩子：验证"新建页面+文书类型"是否真的进入了候选
+  window.__docPages = docPages;
+  window.__candidatesFor = candidatesFor;
     window.__parseJson = parseJson;
   }
 

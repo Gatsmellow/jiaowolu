@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = process.env.JW_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const PORT = 9339;
 const APP = process.argv[2] || 'http://githubtest.io:8791/';
 const HOST_RULES = process.env.JW_HOST_RULES || 'MAP githubtest.io 127.0.0.1';

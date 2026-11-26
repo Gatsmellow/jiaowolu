@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = process.env.JW_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const APP = process.env.JW_APP || 'http://127.0.0.1:8765/';
 const PORT = Number(process.env.JW_CDP_PORT || 9353);
 const ROOT = process.cwd();
