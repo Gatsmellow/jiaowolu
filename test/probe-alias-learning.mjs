@@ -5,7 +5,7 @@
  * 用法：node test/probe-alias-learning.mjs
  */
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -155,6 +155,10 @@ async function main() {
     want(/携氧蛋白/.test(listed.rows[0] || ''), '列表里没有该名称');
     want(/血常规/.test(listed.rows[0] || ''), '列表里没有文书类型');
     want(/1 页/.test(listed.rows[0] || ''), '页数显示不对：' + listed.rows[0]);
+
+    const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(join(process.cwd(), 'docs', 'figs', 'ui-alias.png'), Buffer.from(shot.data, 'base64'));
+    console.log('    截图：docs/figs/ui-alias.png');
 
     console.log('[4] 不选指标就确认：必须被拦下，指标库不能变');
     await cdp.eval(`document.querySelector('[data-act="alias-save"]').click(); 'save-empty'`);
