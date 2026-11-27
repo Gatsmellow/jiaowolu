@@ -136,6 +136,8 @@ async function main() {
     want(got.obsCount === 0, '陌生名称不应产生 Observation');
     want(JSON.stringify(got.fields) === '["docType","rawName"]', '不该保存多余字段：' + JSON.stringify(got.fields));
 
+    const callsAfterRecognize = await cdp.eval(`window.__mockCalls`);
+
     console.log('[3] 聚合：词库学习里应看到这个名称、文书类型与页数');
     // 指标与页面弹层现在挂在"本批规则"对话框里，得先打开它
     await cdp.eval(`document.getElementById('btn-rules').click(); 'rules'`);
@@ -166,6 +168,9 @@ async function main() {
     const afterSave = await cdp.eval(`(function(){ var i = window.Library.byId('HGB'); return { aliases: String(i.aliases||''), name: i.name, unit: i.unit, ref: i.ref }; })()`);
     want(afterSave.aliases.indexOf(NEW_NAME) !== -1, '别名没有写进去：' + afterSave.aliases);
     want(afterSave.name === before.name && afterSave.unit === before.unit && afterSave.ref === before.ref, '别名以外的字段被改了');
+
+    const callsAfterLearning = await cdp.eval(`window.__mockCalls`);
+    want(callsAfterLearning === callsAfterRecognize, '词库学习不该再调用模型：' + callsAfterRecognize + ' → ' + callsAfterLearning);
 
     console.log('[6] 学完之后建议应消失');
     const listed2 = await cdp.eval(`document.querySelectorAll('.alias-grid tbody tr').length`);
