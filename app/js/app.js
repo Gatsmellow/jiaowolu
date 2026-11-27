@@ -111,7 +111,23 @@ function aliasKeyOf(rawName, docType) {
    * 存在 IndexedDB（图片是 dataURL，几 MB，localStorage 装不下）。
    * 只存在这台电脑的浏览器里，不上传；24 小时后自动作废，避免哪天打开
    * 发现是上周的旧任务。清空本次任务时一并删掉。 */
-  var CACHE_DB = 'jiaowolu', CACHE_STORE = 'session', CACHE_TTL = 24 * 3600 * 1000;
+  var CACHE_DB = 'jiaowolu', CACHE_STORE = 'session', SNAP_STORE = 'snapshots';
+  /* 任务存档保留多久：默认不过期（0），可在设置里改成 7/30 天。
+     以前的默认是 24 小时，结果"第二天打开就空了"——这正是要修的问题。 */
+  var RETENTION_KEY = 'jiaowolu.retention';
+  function retentionDays() {
+    try {
+      var v = localStorage.getItem(RETENTION_KEY);
+      if (v === '7') return 7;
+      if (v === '30') return 30;
+      return 0;
+    } catch (e) { return 0; }
+  }
+  function retentionLimit() {
+    var d = retentionDays();
+    return d ? d * 86400000 : 0;
+  }
+
   var cacheDb = null, cacheTimer = null;
 
   function cacheOpen() {
@@ -119,9 +135,10 @@ function aliasKeyOf(rawName, docType) {
       if (cacheDb) return resolve(cacheDb);
       if (!window.indexedDB) return resolve(null);
       var req;
-      try { req = indexedDB.open(CACHE_DB, 1); } catch (e) { return resolve(null); }
+      try { req = indexedDB.open(CACHE_DB, 2); } catch (e) { return resolve(null); }
       req.onupgradeneeded = function () {
         if (!req.result.objectStoreNames.contains(CACHE_STORE)) req.result.createObjectStore(CACHE_STORE);
+        if (!req.result.objectStoreNames.contains(SNAP_STORE)) req.result.createObjectStore(SNAP_STORE);
       };
       req.onsuccess = function () { cacheDb = req.result; resolve(cacheDb); };
       req.onerror = function () { resolve(null); };
@@ -179,6 +196,107 @@ function aliasKeyOf(rawName, docType) {
         tx.objectStore(CACHE_STORE).delete('session');
       } catch (e) { /* ignore */ }
     }).catch(function () {});
+  }
+
+  /* ---------------- 手动存档（Ctrl+S） ----------------
+     按"日期 → 当天这些患者"存放。目的只有一个：做完质控却忘了导出时，
+     结果还留得住，不用再花一次识别费用。
+     同一天再存一次就覆盖当天那份；内容没变则不重复写。 */
+  var snapHash = '';
+
+  function taskHash() {
+    // 只对"会影响结果"的东西取指纹：患者、报告元信息、识别结果、人工裁决
+    var slim = {
+      p: S.patients.map(function (p) { return [p.id, p.code]; }),
+      a: S.assets.map(function (a) { return [a.id, a.patientId, a.name, a.pageNo, a.docType, a.status, a.reportDate]; }),
+      o: S.observations.map(function (o) { return [o.id, o.patientId, o.assetId, o.indicatorId, o.value, o.unit, o.date, o.method]; }),
+      r: S.reviews.map(function (r) { return [r.id, r.patientId, r.indicatorId, r.before, r.after]; })
+    };
+    var text = JSON.stringify(slim);
+    var h = 0;
+    for (var i = 0; i < text.length; i++) { h = (h * 31 + text.charCodeAt(i)) | 0; }
+    return String(h) + ':' + text.length;
+  }
+
+  function todayKey() {
+    var d = new Date();
+    var m = String(d.getMonth() + 1).padStart(2, '0');
+    var day = String(d.getDate()).padStart(2, '0');
+    return d.getFullYear() + '-' + m + '-' + day;
+  }
+
+  function snapshotPayload() {
+    var patients = S.patients.map(function (p) {
+      var obs = S.observations.filter(function (o) { return o.patientId === p.id; });
+      var as = S.assets.filter(function (a) { return a.patientId === p.id; });
+      return {
+        id: p.id,
+        code: p.code,
+        exportedAt: p.exportedAt || 0,
+        reports: as.length,
+        recognized: as.filter(function (a) { return a.status === 'done'; }).length,
+        rows: obs.length
+      };
+    });
+    return {
+      at: Date.now(),
+      date: todayKey(),
+      hash: snapHash,
+      patients: patients,
+      task: {
+        patients: S.patients,
+        // 存档不放图片，图片还在任务缓存里；没有缓存时恢复后需要重新上传
+        assets: S.assets.map(function (a) {
+          var copy = {};
+          Object.keys(a).forEach(function (k) { if (k !== 'dataUrl') copy[k] = a[k]; });
+          return copy;
+        }),
+        observations: S.observations,
+        reviews: S.reviews,
+        seq: S.seq
+      }
+    };
+  }
+
+  function snapshotSave(silent) {
+    snapHash = taskHash();
+    var payload = snapshotPayload();
+    return cacheOpen().then(function (db) {
+      if (!db) { if (!silent) toast('这个浏览器不支持本地存档', 'err'); return null; }
+      return new Promise(function (resolve) {
+        try {
+          var tx = db.transaction(SNAP_STORE, 'readwrite');
+          tx.objectStore(SNAP_STORE).put(payload, payload.date);
+          tx.oncomplete = function () { resolve(payload); };
+          tx.onerror = function () { resolve(null); };
+          tx.onabort = function () { resolve(null); };
+        } catch (e) { resolve(null); }
+      });
+    }).then(function (payload) {
+      if (!payload) { if (!silent) toast('存档失败：浏览器存储可能已满', 'err'); return null; }
+      if (!silent) {
+        var done = payload.patients.filter(function (p) { return p.recognized > 0; }).length;
+        toast('已存档到本机：' + payload.date + '，' + payload.patients.length + ' 位患者（' + done + ' 位已识别）', 'ok');
+      }
+      return payload;
+    }).catch(function () { return null; });
+  }
+
+  function snapshotList() {
+    return cacheOpen().then(function (db) {
+      if (!db) return [];
+      return new Promise(function (resolve) {
+        try {
+          var tx = db.transaction(SNAP_STORE, 'readonly');
+          var rq = tx.objectStore(SNAP_STORE).getAll();
+          rq.onsuccess = function () {
+            var rows = (rq.result || []).slice().sort(function (a, b) { return b.date < a.date ? -1 : 1; });
+            resolve(rows);
+          };
+          rq.onerror = function () { resolve([]); };
+        } catch (e) { resolve([]); }
+      });
+    }).catch(function () { return []; });
   }
 
   /* 把上次的任务装回来。跑一半被关掉的，状态退回"待识别"。 */
@@ -674,9 +792,11 @@ function aliasKeyOf(rawName, docType) {
     var focused = document.activeElement.closest('#patient-list button');
     box.innerHTML = S.patients.map(function (p) {
       var active = p.id === S.currentId;
+      var obs = S.observations.filter(function (o) { return o.patientId === p.id; }).length;
+      var unsaved = obs > 0 && !p.exportedAt;
       return '<div class="patient' + (active ? ' active' : '') + '" data-pid="' + esc(p.id) + '">' +
         '<button type="button" class="patient-select" aria-current="' + active + '">' +
-        '<span class="patient-code">' + esc(p.code) + '</span>' +
+        '<span class="patient-code">' + esc(p.code) + (unsaved ? '<i class="draft-dot" title="结果还没导出">未导出</i>' : '') + '</span>' +
         '<span class="patient-meta">' + assetsOf(p.id).length + ' 页报告 · ' + patientStatus(p.id) + '</span></button>' +
         '<button type="button" class="del" data-del="' + esc(p.id) + '" aria-label="移除' + esc(p.code) + '">×</button></div>';
     }).join('');
@@ -1109,12 +1229,28 @@ function aliasKeyOf(rawName, docType) {
     return p;
   }
 
+  /* 结果有变化 → 这位患者重新变成"未导出"，关页面前才会提醒。 */
+  function markPatientDirty(pid) {
+    var p = S.patients.find(function (x) { return x.id === pid; });
+    if (p && p.exportedAt) { p.exportedAt = 0; }
+  }
+
+  function unexportedPatients() {
+    return S.patients.filter(function (p) {
+      var obs = S.observations.filter(function (o) { return o.patientId === p.id; });
+      return obs.length > 0 && !p.exportedAt;
+    });
+  }
+
   function removePatient(pid) {
     if (importing.has(pid) || S.runningPatientId === pid) {
       toast('请等这位患者的导入或识别完成后再移除。', 'err');
       return;
     }
-    if (assetsOf(pid).length && !confirm('移除这位患者及其所有报告和识别结果？')) return;
+    var warn = '';
+    var unsettled = unexportedPatients().filter(function (p) { return p.id === pid; });
+    if (unsettled.length) warn = '\n这位患者的数据质控结果尚未导出，移除后就找不回来了。';
+    if (assetsOf(pid).length && !confirm('移除这位患者及其所有报告和识别结果？' + warn)) return;
     S.patients = S.patients.filter(function (p) { return p.id !== pid; });
     S.assets = S.assets.filter(function (a) { return a.patientId !== pid; });
     S.observations = S.observations.filter(function (o) { return o.patientId !== pid; });
@@ -1590,6 +1726,7 @@ function aliasKeyOf(rawName, docType) {
     asset.reportType = data.report_type || cls.type;
     asset.reportDate = data.report_date || '';
     asset.unmatched = unmatched;
+    markPatientDirty(asset.patientId);
     // 记住这次是按哪一批指标问的。以后本批规则改了（换了页面组），
     // 就能据此判断"这份报告得重新识别一次"，而不是让人自己猜。
     asset.sentIds = ids.slice();
@@ -1759,7 +1896,24 @@ function aliasKeyOf(rawName, docType) {
       '<div class="field"><label for="cfg-model">模型</label>' +
       '<input id="cfg-model" value="' + esc(c.model) + '">' +
       '<p class="note">必须是能看图的模型。纯文本模型不会报错，但会编出结果——这比失败更危险。</p></div>' +
-      '<button id="cfg-save" class="btn primary">保存</button>'
+      '<button id="cfg-save" class="btn primary">保存</button>' +
+      '<hr class="cfg-sep">' +
+      '<h3>本机存储</h3>' +
+      '<div class="field"><label for="cfg-retention">任务存档保留</label>' +
+      '<select id="cfg-retention">' +
+      '<option value=""' + (retentionDays() === 0 ? ' selected' : '') + '>不过期（默认）</option>' +
+      '<option value="7"' + (retentionDays() === 7 ? ' selected' : '') + '>保留 7 天</option>' +
+      '<option value="30"' + (retentionDays() === 30 ? ' selected' : '') + '>保留 30 天</option>' +
+      '</select>' +
+      '<p class="note">当前任务（患者、报告、识别结果）存在这台电脑的浏览器里，关掉页面不会丢。' +
+      '换一台电脑、换一个访问地址（比如从 127.0.0.1 换成 GitHub Pages）都读不到，这是浏览器的隔离规则。</p></div>' +
+      '<div class="field"><label>占用空间</label><span id="cfg-size">计算中…</span>' +
+      '<p class="note">报告图片也在这份占用里。存不下时可以改成保留 7 天，或清理旧任务。</p></div>' +
+      '<div class="field"><label>手动存档</label>' +
+      '<button id="cfg-snap" class="btn">立即存档（Ctrl+S）</button>' +
+      '<p class="note">按"日期 → 当天这些患者"存一份，同一天再存会覆盖。' +
+      '做完质控忘了导出时，结果还留得住。</p>' +
+      '<div id="cfg-snaps" class="snap-list">读取中…</div></div>'
     );
 
     $('#cfg-save').addEventListener('click', function () {
@@ -1774,6 +1928,38 @@ function aliasKeyOf(rawName, docType) {
       updatePill();
       renderWorkspace();
       toast('已保存', 'ok');
+    });
+
+    // 存储与存档
+    var days = retentionDays();
+    var sizeText = '计算中…';
+    var sizeEl = $('#cfg-size');
+    if (navigator.storage && navigator.storage.estimate) {
+      navigator.storage.estimate().then(function (info) {
+        if (!sizeEl) return;
+        var mb = (info.usage || 0) / 1048576;
+        sizeEl.textContent = mb < 1 ? (Math.round((info.usage || 0) / 1024) + ' KB') : (mb.toFixed(1) + ' MB');
+      }).catch(function () { if (sizeEl) sizeEl.textContent = '未知'; });
+    } else if (sizeEl) {
+      sizeEl.textContent = '这个浏览器不支持统计';
+    }
+
+    $('#cfg-retention').addEventListener('change', function () {
+      try { localStorage.setItem(RETENTION_KEY, this.value); } catch (e) { /* ignore */ }
+      toast(this.value === '' ? '已设为不过期' : '已设为保留 ' + this.value + ' 天', 'ok');
+    });
+
+    $('#cfg-snap').addEventListener('click', function () { snapshotSave(false); });
+
+    snapshotList().then(function (rows) {
+      var box = $('#cfg-snaps');
+      if (!box) return;
+      if (!rows.length) { box.textContent = '还没有存档。按 Ctrl+S 或上面的按钮存一份。'; return; }
+      box.innerHTML = rows.slice(0, 5).map(function (r) {
+        return '<div class="snap-row"><b>' + esc(r.date) + '</b> ' +
+          (r.patients || []).length + ' 位患者 · ' +
+          (r.patients || []).filter(function (p) { return p.recognized > 0; }).length + ' 位已识别</div>';
+      }).join('');
     });
   }
 
@@ -1932,6 +2118,7 @@ function aliasKeyOf(rawName, docType) {
       dropped: (extra && extra.dropped) || []
     };
     S.reviews.push(e);
+    markPatientDirty(e.patientId);
     return e;
   }
 
@@ -2765,6 +2952,7 @@ function aliasKeyOf(rawName, docType) {
     var patients = scope.map(function (p) {
       var secrets = identSecrets(p.id);
       return {
+        pid: p.id,
         code: p.code,
         reports: assetsOf(p.id).map(function (a) {
           return {
@@ -2798,6 +2986,15 @@ function aliasKeyOf(rawName, docType) {
     if (!job) return;
     if (job.format === 'CSV') exportCsv(job.patients, job.filename);
     else exportJson(job.patients, job.filename);
+    // 记下"这几位已经导出过"，之后改数据会重新变回未导出
+    var stamp = Date.now();
+    job.patients.forEach(function (row) {
+      var p = S.patients.find(function (x) { return x.id === row.pid; });
+      if (p) p.exportedAt = stamp;
+    });
+    snapHash = taskHash();
+    if (typeof cacheSchedule === 'function') cacheSchedule();
+    renderAll();
     toast('已导出 ' + job.format + ' · ' + job.label, 'ok');
   }
 
@@ -3391,6 +3588,15 @@ function aliasKeyOf(rawName, docType) {
     });
 
     document.addEventListener('keydown', function (e) {
+      var mod = e.ctrlKey || e.metaKey;
+      if (mod && (e.key === 's' || e.key === 'S')) {
+        // 存一份当前任务的本地存档（同一天覆盖），避免做完忘了导出
+        e.preventDefault();
+        var now = taskHash();
+        if (now === snapHash) { toast('没有新的改动，存档已是最新（' + todayKey() + '）', 'ok'); return; }
+        snapshotSave(false);
+        return;
+      }
       if (e.key === 'Escape' && !$('#modal').hidden) closeModal();
       else if (e.key === 'Escape' && !$('#inspector').hidden &&
         !$('#rules-dialog').open && !$('#export-dialog').open) $('#inspector [data-inspector="close"]').click();
@@ -3467,13 +3673,28 @@ function aliasKeyOf(rawName, docType) {
     if (document.visibilityState === 'visible' && !wakeLock) keepAwake();
   });
 
+  /* ---------------- 关页面前的未导出提醒 ----------------
+     浏览器只允许弹系统那句話，写不了"患者 01"；所以精确提示放在
+     删除患者、清空任务这两处，关页面这里只做汇总拦截。 */
+  window.addEventListener('beforeunload', function (e) {
+    // 自动化测试（无头浏览器 navigator.webdriver 为 true）里不拦，
+    // 否则每次 reload 都会挂在浏览器的确认框上，跑不完
+    if (navigator.webdriver) return;
+    if (!S.patients.length) return;
+    if (!unexportedPatients().length) return;
+    e.preventDefault();
+    e.returnValue = '';
+    return '';
+  });
+
   /* ---------------- 启动 ---------------- */
 
   async function init() {
-    // 先把上次没做完的任务装回来（24 小时内有效）
+    // 先把上次没做完的任务装回来（默认不过期，可在设置里改成 7/30 天）
     var saved = null;
     try { saved = await cacheGet(); } catch (e) { saved = null; }
-    if (saved && saved.at && (Date.now() - saved.at) < CACHE_TTL
+    var limit = retentionLimit();
+    if (saved && saved.at && (!limit || (Date.now() - saved.at) < limit)
       && Array.isArray(saved.patients) && saved.patients.length) {
       restoreSession(saved);
     }
@@ -3488,7 +3709,8 @@ function aliasKeyOf(rawName, docType) {
 
     if (saved && S.assets.length) {
       var n = S.assets.length;
-      toast('已恢复上次的任务：' + S.patients.length + ' 位患者、' + n + ' 份报告（存在本机，24 小时后自动清理）', 'ok');
+      var keep = retentionDays() ? '，存档保留 ' + retentionDays() + ' 天' : '';
+      toast('已恢复上次的任务：' + S.patients.length + ' 位患者、' + n + ' 份报告（存在本机' + keep + '）', 'ok');
     }
 
     // 暴露给控制台，方便调试
