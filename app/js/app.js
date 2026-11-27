@@ -20,6 +20,25 @@
 /* 报告上用这些符号表示"这一项没做/无结果"，不是数值 */
 var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未查|无|未见)$/;
 
+/* 词库学习：只记录"模型读到了名字、但本地词库认不出来"的项目名。
+ * 不含值、日期、患者标识；随任务资产走 24 小时缓存，清空任务即删。 */
+var ALIAS_MAX = 50;
+var ALIAS_JUNK = /^(?:[—－\-/／]+|\d+(?:\.\d+)?|[^\u4e00-\u9fa5A-Za-z0-9]+|无|未见|未做|未检测|未测|未查)$/;
+var aliasIgnored = new Set();   // 只在本页会话内有效，刷新即恢复
+var aliasRows = [];             // 当前渲染的建议列表，供点击时按下标取用
+
+function cleanRawName(value) {
+  var t = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  t = t.slice(0, 40).trim();
+  if (ALIAS_JUNK.test(t)) return '';
+  return t;
+}
+
+function aliasKeyOf(rawName, docType) {
+  return String(rawName || '').toLowerCase().replace(/\s+/g, ' ') + '\u0000' + String(docType || '');
+}
+
   /* 文书类型 → 只有这类文书上才会成组出现的页面。
      先判类型再抽取，是为了不让模型到出院记录的正文里去"捞"血常规——
      那里面确实写着"白细胞计数:5.54*10^9/L"，照抄下来就成了另一份来源，
@@ -1514,14 +1533,25 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
     // 先清掉这份报告旧的识别结果，保证"一份报告只抽一次"
     S.observations = S.observations.filter(function (o) { return o.assetId !== asset.id; });
 
-    var added = 0, unmatched = [];
+    var added = 0, unmatched = [], unmatchedSeen = {};
     items.forEach(function (it) {
       if (!it) return;
       var hit = window.IndicatorLib.match(it.raw_name, it.indicator, it.unit);
-      if (!hit || ids.indexOf(hit.id) === -1) {
-        if (it.raw_name) unmatched.push(it.raw_name);
+      if (!hit) {
+        // 真·陌生名称：模型读到了，但本地词库认不出来。
+        var raw = cleanRawName(it.raw_name);
+        if (raw) {
+          var k = aliasKeyOf(raw, cls.type);
+          if (!unmatchedSeen[k]) {
+            unmatchedSeen[k] = 1;
+            unmatched.push({ rawName: raw, docType: cls.type || '' });
+            if (unmatched.length > ALIAS_MAX) unmatched.shift();
+          }
+        }
         return;
       }
+      // 指标本身存在、只是这一批没选它：不算陌生名称，也不该建议加别名
+      if (ids.indexOf(hit.id) === -1) return;
       var v = it.value == null ? '' : String(it.value).trim();
       // 报告上常把"这一项没做/无结果"印成 —、-、/ 之类的占位符。
       // 当成数值录进去会让"必填缺失"漏报，所以这里直接不产生观测值。
@@ -1987,6 +2017,78 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
     if (msg) toast(msg, 'ok');
   }
 
+  /* 只读聚合：当前任务内所有报告页上"读到了名字、但本地词库认不出来"的项目名。
+   * 不修改任何状态；已经能被现有精确别名认出的、以及本会话被忽略的，都不再出现。 */
+  function buildAliasSuggestions() {
+    var map = {};
+    S.assets.forEach(function (a) {
+      (a.unmatched || []).forEach(function (u) {
+        if (!u || !u.rawName) return;
+        var k = aliasKeyOf(u.rawName, u.docType);
+        if (!map[k]) map[k] = { key: k, rawName: u.rawName, docType: u.docType || '', pages: 0, seen: {} };
+        if (!map[k].seen[a.id]) { map[k].seen[a.id] = 1; map[k].pages++; }
+      });
+    });
+    return Object.keys(map).map(function (k) {
+      var x = map[k];
+      return { key: x.key, rawName: x.rawName, docType: x.docType, pages: x.pages };
+    }).filter(function (x) {
+      if (aliasIgnored.has(x.key)) return false;
+      var m = window.IndicatorLib.match(x.rawName, '', '');
+      return !(m && m.method === 'exact-alias');  // 已经能精确认出，就不用再学了
+    }).sort(function (a, b) {
+      return b.pages - a.pages || a.rawName.localeCompare(b.rawName, 'zh');
+    });
+  }
+
+  function aliasRowsHtml(rows) {
+    var inds = window.Library.indicators();
+    return rows.map(function (s, i) {
+      var opts = '<option value="">请选择已有指标</option>' + inds.map(function (x) {
+        return '<option value="' + esc(x.id) + '">' + esc(x.name) + '（' + esc(x.id) + '）</option>';
+      }).join('');
+      return '<tr>' +
+        '<td>' + esc(s.rawName) + '</td>' +
+        '<td>' + esc(s.docType || '其他') + '</td>' +
+        '<td class="mono">' + s.pages + ' 页</td>' +
+        '<td><select class="alias-sel" id="alias-sel-' + i + '">' + opts + '</select></td>' +
+        '<td class="row-act">' +
+          '<button class="link tiny" data-act="alias-save" data-idx="' + i + '">记住对应关系</button>' +
+          '<button class="link tiny danger" data-act="alias-ignore" data-idx="' + i + '">忽略</button>' +
+        '</td></tr>';
+    }).join('');
+  }
+
+  /* 把陌生名称写进某个已有指标的同义词。
+   * 只改 aliases，其他字段原样带回；updateIndicator 内部会重建索引并保存。 */
+  function saveAlias(idx, indId) {
+    var row = aliasRows[idx];
+    if (!row) return;
+    var ind = window.Library.byId(indId);
+    if (!ind) { toast('这个指标已经不在了，请刷新后重试', 'err'); return; }
+    var hit = window.IndicatorLib.match(row.rawName, '', '');
+    if (hit && hit.method === 'exact-alias') {
+      if (hit.id === indId) { toast('这个名称已经对应它了，不需要重复添加', 'ok'); return; }
+      var other = window.Library.byId(hit.id);
+      toast('这个名称已经对应「' + (other ? other.name : hit.id) + '」，不能直接改挂到「' + ind.name +
+        '」，请先在指标库中核对。', 'err');
+      return;
+    }
+    var def = {};
+    Object.keys(ind).forEach(function (k) { def[k] = ind[k]; });
+    def.aliases = [String(ind.aliases || '').replace(/[，,、;；]\s*$/, ''), row.rawName]
+      .filter(Boolean).join('，');
+    try {
+      window.Library.updateIndicator(indId, def);
+    } catch (e) {
+      toast('保存失败：' + (e.message || e), 'err');
+      return;
+    }
+    libChangeDone();
+    renderLibrary();
+    toast('已保存到本地词库，后续识别可复用；已有结果需重新识别才会更新。', 'ok');
+  }
+
   function indicatorRows(filterText) {
     var q = String(filterText || '').trim().toLowerCase();
     return window.Library.indicators().map(function (i) {
@@ -2169,21 +2271,34 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
   function renderLibrary() {
     var inds = window.Library.indicators();
     var pages = window.Library.pages();
+    var suggestions = buildAliasSuggestions();
+    aliasRows = suggestions;
+    var newAct = libTab === 'ind' ? 'ind-new' : (libTab === 'page' ? 'page-new' : 'grp-new');
+    var newLabel = libTab === 'ind' ? '新建指标' : (libTab === 'page' ? '新建页面' : '新建组');
     var html =
       '<h3>指标与页面</h3>' +
       '<div class="tabs">' +
         '<button class="tab' + (libTab === 'ind' ? ' active' : '') + '" data-tab="ind">指标库 <b>' + inds.length + '</b></button>' +
         '<button class="tab' + (libTab === 'page' ? ' active' : '') + '" data-tab="page">页面 <b>' + pages.length + '</b></button>' +
         '<button class="tab' + (libTab === 'grp' ? ' active' : '') + '" data-tab="grp">页面组 <b>' + window.Library.groups().length + '</b></button>' +
+        '<button class="tab' + (libTab === 'alias' ? ' active' : '') + '" data-tab="alias">词库学习 <b>' + suggestions.length + '</b></button>' +
         '<div class="tabs-right">' +
           '<button class="link tiny" data-act="lib-export">导出配置</button>' +
           '<button class="link tiny" data-act="lib-import">导入配置</button>' +
-          '<button class="btn tiny primary" data-act="' + (libTab === 'ind' ? 'ind-new' : libTab === 'page' ? 'page-new' : 'grp-new') + '">+ ' +
-            (libTab === 'ind' ? '新建指标' : libTab === 'page' ? '新建页面' : '新建组') + '</button>' +
+          (libTab === 'alias' ? '' :
+            '<button class="btn tiny primary" data-act="' + newAct + '">+ ' + newLabel + '</button>') +
         '</div>' +
       '</div>';
 
-    if (libTab === 'ind') {
+    if (libTab === 'alias') {
+      html += '<p class="alias-note">这里只列出模型读到、但未能对应本地指标的名称。是否建立对应关系由你确认。</p>' +
+        '<p class="alias-note subtle">学习后影响后续识别；已有结果不会自动改写，需要时请手动重新识别。</p>' +
+        (suggestions.length
+          ? '<div class="pane-scroll"><table class="mini-grid alias-grid"><thead><tr>' +
+              '<th>原始名称</th><th>文书类型</th><th>出现于</th><th>对应指标</th><th></th>' +
+            '</tr></thead><tbody>' + aliasRowsHtml(suggestions) + '</tbody></table></div>'
+          : '<p class="alias-empty">暂时没有待确认的陌生名称。</p>');
+    } else if (libTab === 'ind') {
       html += (libForm && libForm.kind === 'ind' ? indicatorForm() : '') +
         '<input id="ind-search" class="pick-search" placeholder="搜索代号、名称或同义词…">' +
         '<div class="pane-scroll">' +
@@ -2280,6 +2395,25 @@ var PLACEHOLDER_VALUES = /^(—+|－+|-{1,3}|\/|／|未做|未检测|未测|未�
     }
 
     try {
+      if (act === 'alias-save') {
+        var ai = Number(btn.getAttribute('data-idx'));
+        var sel = $('#alias-sel-' + ai);
+        if (!sel || !sel.value) {
+          toast('请先选择这个名称对应的指标', 'err');
+          return;
+        }
+        saveAlias(ai, sel.value);
+        return;
+      }
+      if (act === 'alias-ignore') {
+        var gi = Number(btn.getAttribute('data-idx'));
+        var row = aliasRows[gi];
+        if (row) {
+          aliasIgnored.add(row.key);   // 只在本页会话内有效，不写本地存储
+          renderLibrary();
+        }
+        return;
+      }
       if (act === 'ind-req') {
         var rid = btn.value;
         setReq(rid, btn.checked);
