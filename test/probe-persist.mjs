@@ -9,7 +9,7 @@
  * 用法：node test/probe-persist.mjs
  */
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -266,9 +266,11 @@ async function main() {
     console.log('[6] 删除患者时，提示里带"尚未导出"');
     const confirmText = await cdp.eval(`(function(){
       var seen = '';
+      var orig = window.confirm;
       window.confirm = function(msg){ seen = msg; return false; };
-      var del = document.querySelector('#patient-list [data-del]');
+      var del = document.querySelector('#patient-list .del');
       if (del) del.click();
+      window.confirm = orig;      // 必须还原，否则后面所有确认框都会被静默拒绝
       return seen;
     })()`);
     want(/尚未导出/.test(confirmText), '删除提示里没有"尚未导出"：' + confirmText);
@@ -283,6 +285,50 @@ async function main() {
 
     want(cdp.errors.length === 0, '页面有未处理异常：' + JSON.stringify(cdp.errors.slice(0, 3)));
 
+    console.log('[8] 存档能恢复：删掉患者后，从当天的存档装回来');
+    const base2 = await cdp.eval(`(function(){ return { p: window.__S.patients.length, a: window.__S.assets.length, o: window.__S.observations.length }; })()`);
+    await cdp.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true })); 'save'`);
+    await sleep(1000);
+    await cdp.eval(`document.getElementById('btn-settings').click(); 'settings'`);
+    await sleep(800);
+    const hasRestore = await cdp.eval(`(function(){ return !!document.querySelector('[data-act="snap-restore"]'); })()`);
+    want(hasRestore, '存档列表里没有"恢复"按钮');
+    const shotSnap = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(join(process.cwd(), 'docs', 'figs', 'ui-snapshot.png'), Buffer.from(shotSnap.data, 'base64'));
+    console.log('    截图：docs/figs/ui-snapshot.png');
+
+    await cdp.eval(`(function(){ var o = window.confirm; window.confirm = function(){ return true; }; var b = document.querySelector('#patient-list .del'); if (b) b.click(); window.confirm = o; return 1; })()`);
+    await sleep(800);
+    const afterDel = await cdp.eval(`(function(){ return { p: window.__S.patients.length, a: window.__S.assets.length }; })()`);
+    want(afterDel.p === 0 || afterDel.a === 0, '删除患者后任务没有变空，测不出恢复效果');
+
+    await cdp.eval(`document.getElementById('btn-settings').click(); 'settings2'`);
+    await sleep(800);
+    await cdp.eval(`(function(){ var b = document.querySelector('[data-act="snap-restore"]'); if (b) b.click(); return 1; })()`);
+    await sleep(1500);
+    const back = await cdp.eval(`(function(){ return { p: window.__S.patients.length, a: window.__S.assets.length, o: window.__S.observations.length }; })()`);
+    console.log('    存档时：', JSON.stringify(base2), ' 恢复后：', JSON.stringify(back));
+    want(back.p === base2.p && back.a === base2.a && back.o === base2.o, '恢复后的任务与存档不一致');
+
+    console.log('[9] 删除存档');
+    await cdp.eval(`document.getElementById('btn-settings').click(); 'settings3'`);
+    await sleep(800);
+    const before = await cdp.eval(`(function(){ return document.querySelectorAll('.snap-row').length; })()`);
+    const delInfo = await cdp.eval(`(function(){
+      var b = document.querySelector('[data-act="snap-del"]');
+      if (!b) return 'no-button';
+      var asked = 0;
+      window.__origConfirm = window.confirm;
+      window.confirm = function(){ asked++; return true; };
+      b.click();
+      window.confirm = window.__origConfirm;
+      return 'clicked, confirm 调用 ' + asked + ' 次';
+    })()`);
+    console.log('    删除按钮：', delInfo);
+    await sleep(1500);
+    const left = await cdp.eval(`(function(){ return document.querySelectorAll('.snap-row').length; })()`);
+    console.log('    删前 ' + before + ' 条，删后 ' + left + ' 条');
+    want(left === before - 1, '删除存档没有生效');
     console.log('\n结果：');
     if (problems.length) {
       problems.forEach((p) => console.log('  ✗ ' + p));

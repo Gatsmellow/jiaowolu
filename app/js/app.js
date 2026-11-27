@@ -238,19 +238,18 @@ function aliasKeyOf(rawName, docType) {
         rows: obs.length
       };
     });
+    var images = 0;
+    S.assets.forEach(function (a) { if (a.dataUrl) images += a.dataUrl.length; });
+    var withImages = images <= 25 * 1024 * 1024;   // 太大就只存结果，不存原图
     return {
       at: Date.now(),
       date: todayKey(),
       hash: snapHash,
+      images: withImages,
       patients: patients,
       task: {
         patients: S.patients,
-        // 存档不放图片，图片还在任务缓存里；没有缓存时恢复后需要重新上传
-        assets: S.assets.map(function (a) {
-          var copy = {};
-          Object.keys(a).forEach(function (k) { if (k !== 'dataUrl') copy[k] = a[k]; });
-          return copy;
-        }),
+        assets: withImages ? S.assets : stripImages(S.assets),
         observations: S.observations,
         reviews: S.reviews,
         seq: S.seq
@@ -258,28 +257,50 @@ function aliasKeyOf(rawName, docType) {
     };
   }
 
+  function stripImages(list) {
+    return (list || []).map(function (a) {
+      var copy = {};
+      Object.keys(a).forEach(function (k) { if (k !== 'dataUrl') copy[k] = a[k]; });
+      return copy;
+    });
+  }
+
   function snapshotSave(silent) {
     snapHash = taskHash();
     var payload = snapshotPayload();
     return cacheOpen().then(function (db) {
       if (!db) { if (!silent) toast('这个浏览器不支持本地存档', 'err'); return null; }
-      return new Promise(function (resolve) {
-        try {
-          var tx = db.transaction(SNAP_STORE, 'readwrite');
-          tx.objectStore(SNAP_STORE).put(payload, payload.date);
-          tx.oncomplete = function () { resolve(payload); };
-          tx.onerror = function () { resolve(null); };
-          tx.onabort = function () { resolve(null); };
-        } catch (e) { resolve(null); }
+      return putSnapshot(db, payload).then(function (ok) {
+        // 存不下（多半是配额满了）：退一步，只存结果不存原图，再试一次
+        if (!ok && payload.images) {
+          payload = snapshotPayload();
+          payload.images = false;
+          payload.task.assets = stripImages(S.assets);
+          return putSnapshot(db, payload).then(function (ok2) { return ok2 ? payload : null; });
+        }
+        return ok ? payload : null;
       });
     }).then(function (payload) {
       if (!payload) { if (!silent) toast('存档失败：浏览器存储可能已满', 'err'); return null; }
       if (!silent) {
         var done = payload.patients.filter(function (p) { return p.recognized > 0; }).length;
-        toast('已存档到本机：' + payload.date + '，' + payload.patients.length + ' 位患者（' + done + ' 位已识别）', 'ok');
+        toast('已存档到本机：' + payload.date + '，' + payload.patients.length + ' 位患者（' + done + ' 位已识别）' +
+          (payload.images ? '' : '，存储空间不够，这次只存了结果没存原图'), 'ok');
       }
       return payload;
     }).catch(function () { return null; });
+  }
+
+  function putSnapshot(db, payload) {
+    return new Promise(function (resolve) {
+      try {
+        var tx = db.transaction(SNAP_STORE, 'readwrite');
+        tx.objectStore(SNAP_STORE).put(payload, payload.date);
+        tx.oncomplete = function () { resolve(true); };
+        tx.onerror = function () { resolve(false); };
+        tx.onabort = function () { resolve(false); };
+      } catch (e) { resolve(false); }
+    });
   }
 
   function snapshotList() {
@@ -299,7 +320,82 @@ function aliasKeyOf(rawName, docType) {
     }).catch(function () { return []; });
   }
 
-  /* 把上次的任务装回来。跑一半被关掉的，状态退回"待识别"。 */
+  /* 把某天的存档装回当前任务：整份替换，恢复前先问一句 */
+  function snapshotRestore(key) {
+    return snapshotList().then(function (rows) {
+      var rec = rows.filter(function (r) { return r.date === key; })[0];
+      if (!rec || !rec.task) { toast('找不到这份存档', 'err'); return null; }
+      var ps = rec.patients || [];
+      var rec0 = ps.filter(function (p) { return p.recognized > 0; }).length;
+      var msg = '把当前任务替换成 ' + rec.date + ' 的存档？\n\n' +
+        '这份存档：' + ps.length + ' 位患者、' + rec0 + ' 位有识别结果，' +
+        (rec.images ? '含报告原图' : '只存了结果，不含原图') + '。\n\n' +
+        '当前任务里还没导出的结果会被覆盖，且不能撤销。';
+      if (!window.confirm(msg)) return null;
+      var t = rec.task;
+      S.patients = t.patients || [];
+      S.assets = (t.assets || []).map(function (a) {
+        if (a.status === 'running') a.status = 'pending';
+        return a;
+      });
+      S.observations = t.observations || [];
+      S.reviews = t.reviews || [];
+      S.seq = t.seq || { obs: 0, asset: 0, patient: 0, review: 0 };
+      // 存档里记着每位患者"导出过没有"，一并装回来，免得误判成已导出
+      var exported = {};
+      ps.forEach(function (p) { exported[p.id] = p.exportedAt || 0; });
+      S.patients.forEach(function (p) { p.exportedAt = exported[p.id] || 0; });
+      S.currentId = S.patients.length ? S.patients[0].id : null;
+      invalidateReq();
+      cacheSchedule();
+      renderAll();
+      closeModal();
+      toast('已恢复 ' + rec.date + ' 的存档：' + S.patients.length + ' 位患者、' +
+        S.observations.length + ' 项结果' + (rec.images ? '' : '（不含原图，缩略图会是空的）'), 'ok');
+      return rec;
+    }).catch(function () { toast('恢复失败', 'err'); return null; });
+  }
+
+  function snapshotDelete(key) {
+    if (!window.confirm('删除 ' + key + ' 这份存档？删了就找不回来了。')) return null;
+    return cacheOpen().then(function (db) {
+      if (!db) return null;
+      return new Promise(function (resolve) {
+        var tx = db.transaction(SNAP_STORE, 'readwrite');
+        tx.objectStore(SNAP_STORE).delete(key);
+        tx.oncomplete = function () { resolve(true); };
+        tx.onerror = function () { resolve(false); };
+      });
+    }).then(function (ok) {
+      if (!ok) { toast('删除失败', 'err'); return null; }
+      toast('已删除 ' + key + ' 的存档', 'ok');
+      if ($('#cfg-snaps')) drawSnapshotList();
+      return true;
+    }).catch(function () { return null; });
+  }
+
+  function drawSnapshotList() {
+    var box = $('#cfg-snaps');
+    if (!box) return;
+    snapshotList().then(function (rows) {
+      if (!box.isConnected) return;
+      if (!rows.length) { box.textContent = '还没有存档。按 Ctrl+S 或上面的按钮存一份。'; return; }
+      box.innerHTML = rows.slice(0, 5).map(function (r) {
+        var ps = r.patients || [];
+        var done = ps.filter(function (p) { return p.recognized > 0; }).length;
+        var reports = ps.reduce(function (s, p) { return s + (p.reports || 0); }, 0);
+        var rowsN = ps.reduce(function (s, p) { return s + (p.rows || 0); }, 0);
+        return '<div class="snap-row"><div class="snap-meta"><b>' + esc(r.date) + '</b> ' +
+          ps.length + ' 位患者 · ' + reports + ' 份报告 · ' + rowsN + ' 项结果' +
+          (done ? ' · ' + done + ' 位已识别' : '') +
+          (r.images ? '' : ' · 不含原图') + '</div>' +
+          '<div class="snap-act"><button class="link" data-act="snap-restore" data-key="' + esc(r.date) + '">恢复</button>' +
+          '<button class="link danger" data-act="snap-del" data-key="' + esc(r.date) + '">删除</button></div></div>';
+      }).join('');
+    });
+  }
+
+
   function restoreSession(saved) {
     S.patients = saved.patients || [];
     S.assets = (saved.assets || []).map(function (a) {
@@ -1949,18 +2045,19 @@ function aliasKeyOf(rawName, docType) {
       toast(this.value === '' ? '已设为不过期' : '已设为保留 ' + this.value + ' 天', 'ok');
     });
 
-    $('#cfg-snap').addEventListener('click', function () { snapshotSave(false); });
+    $('#cfg-snap').addEventListener('click', function () { snapshotSave(false).then(function (p) { if (p) drawSnapshotList(); }); });
 
-    snapshotList().then(function (rows) {
-      var box = $('#cfg-snaps');
-      if (!box) return;
-      if (!rows.length) { box.textContent = '还没有存档。按 Ctrl+S 或上面的按钮存一份。'; return; }
-      box.innerHTML = rows.slice(0, 5).map(function (r) {
-        return '<div class="snap-row"><b>' + esc(r.date) + '</b> ' +
-          (r.patients || []).length + ' 位患者 · ' +
-          (r.patients || []).filter(function (p) { return p.recognized > 0; }).length + ' 位已识别</div>';
-      }).join('');
-    });
+    drawSnapshotList();
+    var snapBox = $('#cfg-snaps');
+    if (snapBox) {
+      snapBox.addEventListener('click', function (e) {
+        var btn = e.target.closest('[data-act]');
+        if (!btn) return;
+        var key = btn.getAttribute('data-key');
+        if (btn.getAttribute('data-act') === 'snap-restore') snapshotRestore(key);
+        else if (btn.getAttribute('data-act') === 'snap-del') snapshotDelete(key);
+      });
+    }
   }
 
   function reportAsset(assetId) {

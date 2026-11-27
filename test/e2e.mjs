@@ -310,9 +310,12 @@ async function main() {
     await cdp.eval("localStorage.removeItem('jiaowolu.library.v2'); localStorage.removeItem('jiaowolu.selectedPages.v2'); 'cleaned'");
   } finally {
     try { chrome.kill(); } catch {}
-    await sleep(300);
     try { rmSync(profile, { recursive: true, force: true }); } catch {}
+    // 直接退出：残留的 WebSocket / 浏览器进程会让 Node 挂着不退
+    process.exit(process.exitCode || 0);
   }
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+main()
+  .then(() => process.exit(process.exitCode || 0))   // 收尾后强制退出，否则残留的 WebSocket 会让进程挂着
+  .catch((e) => { console.error(e); process.exit(1); });
